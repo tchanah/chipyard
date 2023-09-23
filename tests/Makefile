@@ -23,11 +23,13 @@ ARCHFLAGS = -march=$(ARCH) -mabi=$(ABI)
 
 CFLAGS  = -std=gnu99 -O2 -fno-common -fno-builtin-printf -Wall
 CFLAGS += $(ARCHFLAGS)
+CFLAGS += -lc -lrdimon -u _printf_float
+
 LDFLAGS = -static
 
 include libgloss.mk
 
-PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
+PROGRAMS ?= pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            streaming-passthrough streaming-fir nvdla spiflashread spiflashwrite fft gcd \
            hello mt-hello
 
@@ -43,13 +45,13 @@ spiflash.img: spiflash.py
 	python3 $<
 
 %.o: %.S
-	$(GCC) $(CFLAGS) -D__ASSEMBLY__=1 -c $< -o $@
+	$(GCC) $(CFLAGS) -D__ASSEMBLY__=1 -c $< -o $@ -lm
 
 %.o: %.c mmio.h spiflash.h
-	$(GCC) $(CFLAGS) -c $< -o $@
+	$(GCC) $(CFLAGS) -c $< -o $@ -lm
 
 %.riscv: %.o $(libgloss)
-	$(GCC) $(LDFLAGS) $< -o $@
+	$(GCC) $(LDFLAGS) $< -o $@ -lm
 
 %.dump: %.riscv
 	$(OBJDUMP) -D $< > $@
