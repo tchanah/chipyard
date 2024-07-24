@@ -64,6 +64,7 @@ class REFV256D128RocketConfig extends Config(
   new chipyard.config.WithSystemBusWidth(128) ++
   new freechips.rocketchip.subsystem.WithRocketCease(false) ++
   new freechips.rocketchip.subsystem.WithRocketDebugROB ++
+  new freechips.rocketchip.subsystem.WithFP16 ++
   new freechips.rocketchip.subsystem.WithNBigCores(1) ++
   new freechips.rocketchip.subsystem.WithNBanks(4) ++
   new chipyard.config.AbstractConfig)
@@ -279,4 +280,25 @@ class DSPMultiSaturnConfig extends Config(
 
   new freechips.rocketchip.subsystem.WithNBigCores(1) ++ // ctrl core
   new freechips.rocketchip.subsystem.WithNBanks(4) ++
+  new chipyard.config.AbstractConfig)
+
+
+// make run-binary CONFIG=REFV128D64ShuttleTapeoutConfig BINARY=../../../../Baremetal-NN/build/tests/tests 
+
+class REFV256D128RocketTapeoutConfig extends Config(
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new saturn.rocket.WithRocketVectorUnit(256, 128, VectorParams.refParams) ++
+  new freechips.rocketchip.subsystem.WithRocketCease(false) ++
+  new freechips.rocketchip.subsystem.WithRocketDebugROB ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++
+  new freechips.rocketchip.subsystem.WithFP16 ++
+  new freechips.rocketchip.subsystem.WithNBanks(4) ++
+  new chipyard.config.AbstractConfig)
+
+class REFV128D64ShuttleTapeoutConfig extends Config(
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new saturn.shuttle.WithShuttleVectorUnit(128, 64, VectorParams.refParams) ++
+  new shuttle.common.WithShuttleTileBeatBytes(16) ++
+  new shuttle.common.WithTCM ++
+  new shuttle.common.WithNShuttleCores(1) ++
   new chipyard.config.AbstractConfig)
