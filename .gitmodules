@@ -21,7 +21,7 @@
 	url = https://github.com/firesim/firesim.git
 [submodule "generators/icenet"]
 	path = generators/icenet
-	url = https://github.com/firesim/icenet.git
+	url = https://github.com/tchanah/icenet
 [submodule "tools/dsptools"]
 	path = tools/dsptools
 	url = https://github.com/ucb-bar/dsptools.git
