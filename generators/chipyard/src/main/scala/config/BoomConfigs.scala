@@ -60,3 +60,11 @@ class dmiMediumBoomCosimConfig extends Config(
   new chipyard.config.WithDMIDTM ++                              // have debug module expose a clocked DMI port
   new boom.common.WithNMediumBooms(1) ++
   new chipyard.config.AbstractConfig)
+
+class PacketModifierConfig extends Config(
+  new icenet.collective.WithPacketModifier ++         // Add the custom module
+  new chipyard.harness.WithPacketModifierHarness ++   // Add the custom harness for the module
+  new icenet.WithIceNIC ++                            // Add the NIC
+  new boom.common.WithNLargeBooms(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig)

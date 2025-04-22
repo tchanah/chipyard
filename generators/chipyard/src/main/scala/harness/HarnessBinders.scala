@@ -21,7 +21,7 @@ import testchipip.uart.{UARTAdapter, UARTToSerial}
 import testchipip.serdes._
 import testchipip.iceblk.{SimBlockDevice, BlockDeviceModel}
 import testchipip.cosim.{SpikeCosim}
-import icenet.{NicLoopback, SimNetwork}
+import icenet.{NicLoopback, SimNetwork, PacketModifierConnector}
 import chipyard._
 import chipyard.clocking.{HasChipyardPRCI}
 import chipyard.iobinders._
@@ -317,3 +317,19 @@ class WithResetFromHarness extends HarnessBinder({
   }
 })
 
+// Harness for the Packet Modifier
+class WithPacketModifierHarness extends HarnessBinder({
+  // th: HasHarnessInstantiators provides context/API for harness generation
+  // port: The specific port instance (NICPort in this case)
+  // chipId: Identifier for multi-chip systems
+  case (th: HasHarnessInstantiators, port: NICPort, chipId: Int) => {
+    // Get the implicit Parameters context. port.p is the standard way.
+    implicit val p: Parameters = th.p
+
+    println(s"[[Chipyard Harness Binder]] Found NICPort ${chipId}, applying PacketModifierConnector")
+    // Call the connect method from your PacketModifierConnector object
+    // Pass the NIC IO bundle (port.io) and the NIC parameters (port.params)
+    // The implicit 'p' will be passed automatically by the compiler
+    withClock(port.io.clock) {PacketModifierConnector.connect(port.io.bits, port.params)}
+  }
+})

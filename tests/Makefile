@@ -29,7 +29,8 @@ include libgloss.mk
 
 PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            streaming-passthrough streaming-fir nvdla spiflashread spiflashwrite fft gcd \
-           hello mt-hello symmetric
+           hello mt-hello symmetric \
+		   collective/packetmodifier
 
 
 .DEFAULT_GOAL := default
