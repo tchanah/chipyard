@@ -68,3 +68,11 @@ class PacketModifierConfig extends Config(
   new boom.common.WithNLargeBooms(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig)
+
+class RecursiveDoublingConfig extends Config(
+  new icenet.collective.WithRecursiveDoubling ++         // Add the custom module
+  new chipyard.harness.WithRecursiveDoublingHarness ++   // Add the custom harness for the module
+  new icenet.WithIceNIC ++                            // Add the NIC
+  new boom.common.WithNLargeBooms(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig)

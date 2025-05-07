@@ -21,7 +21,7 @@ import testchipip.uart.{UARTAdapter, UARTToSerial}
 import testchipip.serdes._
 import testchipip.iceblk.{SimBlockDevice, BlockDeviceModel}
 import testchipip.cosim.{SpikeCosim}
-import icenet.{NicLoopback, SimNetwork, PacketModifierConnector}
+import icenet._
 import chipyard._
 import chipyard.clocking.{HasChipyardPRCI}
 import chipyard.iobinders._
@@ -331,5 +331,35 @@ class WithPacketModifierHarness extends HarnessBinder({
     // Pass the NIC IO bundle (port.io) and the NIC parameters (port.params)
     // The implicit 'p' will be passed automatically by the compiler
     withClock(port.io.clock) {PacketModifierConnector.connect(port.io.bits, port.params)}
+  }
+})
+
+/**
+ * Harness Binder to connect the RecursiveDoubling module in a loopback
+ * configuration for a NICPort in the simulation harness.
+ */
+class WithRecursiveDoublingHarness extends HarnessBinder({
+  // th: Provides harness context (like the global Parameters 'p')
+  // port: Matches specifically against NICPort instances found during harness generation.
+  // chipId: Identifier for multi-chip systems (often 0 for single chip).
+  case (th: HasHarnessInstantiators, port: NICPort, chipId: Int) => {
+    // Extract the implicit Parameters context from the harness thread 'th'.
+    implicit val p: Parameters = th.p
+
+    // *** CHANGED: Updated print statement ***
+    println(s"[[Chipyard Harness Binder]] Found NICPort ${chipId}, applying RecursiveDoublingConnector")
+
+    // Ensure logic runs in the clock domain associated with the NIC port.
+    withClock(port.io.clock) {
+      // Assuming port.params for a NICPort is guaranteed to be NICConfig.
+      // If not, a match statement would be safer.
+      // *** CHANGED: Call RecursiveDoublingConnector.connect ***
+      // *** CHANGED: Cast port.params to NICConfig as required by the connector ***
+      RecursiveDoublingConnector.connect(
+        port.io.bits,                    // This is the NICIOvonly bundle
+        port.params.asInstanceOf[NICConfig] // Pass the NIC configuration, casting from Any
+      )
+      // The implicit 'p' is automatically passed to RecursiveDoublingConnector.connect
+    }
   }
 })
