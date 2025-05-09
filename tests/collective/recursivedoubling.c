@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h> // For size_t, NULL etc.
+#include <time.h>
 
 // --- MMIO and NIC Driver Headers ---
 #include "../mmio.h" // Assumed to be in ../ relative to the C file
@@ -36,6 +37,7 @@ static inline void sim_fail(uint64_t code) {
 #define TOTAL_PACKET_LEN (METADATA_LEN + DATA_PAYLOAD_LEN)  // 8 + 1024 = 1032
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
+#define NUM_TEST_SETS 5  // Number of different test sets to run
 
 // Define metadata values (example)
 #define META_COLL_ID   0xABCD
@@ -80,19 +82,80 @@ void print_elements(const char* title, const uint32_t* elements, size_t num_elem
     printf("\n");
 }
 
+// Generate a random permutation of numbers 0 to n-1
+void generate_random_permutation(int* perm, int n) {
+    // Initialize with sequential numbers
+    for (int i = 0; i < n; i++) {
+        perm[i] = i;
+    }
+    
+    // Fisher-Yates shuffle
+    for (int i = n - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        printf("Shuffle: i=%d, j=%d\n", i, j);
+        // Swap
+        int temp = perm[i];
+        perm[i] = perm[j];
+        perm[j] = temp;
+    }
+}
+
+// Calculate expected output for a given level and input data
+void calculate_expected_output(uint32_t* expected, const uint32_t* input, 
+                            const uint32_t* previous_output, int level) {
+    if (level == 0) {
+        // Level 0: Output is just the input
+        memcpy(expected, input, DATA_PAYLOAD_LEN);
+    } else {
+        // Level > 0: Output is input + previous level's output
+        for (int i = 0; i < NUM_ELEMENTS; ++i) {
+            expected[i] = input[i] + previous_output[i];
+        }
+    }
+}
+
+// Add these debug print functions after the existing helper functions
+void print_packet_metadata(const char* prefix, const uint8_t* buf) {
+    printf("%s Metadata:\n", prefix);
+    printf("  Collective ID: 0x%04x\n", (buf[1] << 8) | buf[0]);
+    printf("  Collective Type: 0x%02x\n", buf[2]);
+    printf("  Operation: 0x%02x\n", buf[3]);
+    printf("  Reserved: 0x%02x%02x\n", buf[4], buf[5]);
+    printf("  Max Level: %u\n", buf[6]);
+    printf("  Current Level: %u\n", buf[7]);
+}
+
+void print_packet_data(const char* prefix, const uint8_t* buf) {
+    printf("%s First 8 Data Elements:\n", prefix);
+    const uint32_t* elements = (const uint32_t*)(buf + METADATA_LEN);
+    for (int i = 0; i < 8; i++) {
+        printf("  Element[%d]: 0x%08x\n", i, elements[i]);
+    }
+    printf("\n");
+}
 
 // --- Main Test ---
 
 int main() {
     printf("Starting RecursiveDoubling Bare-Metal Test with SimpleNIC...\n");
-    printf("Sending %d packets, %d elements (%d bytes payload) each.\n",
+    printf("Running %d test sets with random packet orderings\n", NUM_TEST_SETS);
+    printf("Each set: %d packets, %d elements (%d bytes payload)\n",
            NUM_PACKETS, NUM_ELEMENTS, DATA_PAYLOAD_LEN);
-    printf("Max Recursion Level set in packets: %d\n", MAX_RECURSION_LEVEL);
+    printf("Max Recursion Level: %d\n", MAX_RECURSION_LEVEL);
     #if DEBUG_PRINT_PACKETS
         printf(">>> Full packet debug printing is ENABLED <<<\n");
     #else
         printf(">>> Full packet debug printing is DISABLED <<<\n");
     #endif
+
+    // Initialize random seed with a better method
+    unsigned int seed = (unsigned int)time(NULL);
+    if (seed == (unsigned int)-1) {
+        // If time() fails, use a fallback method
+        seed = (unsigned int)((uintptr_t)&seed);  // Use address as fallback
+    }
+    srand(seed);
+    printf("Random seed: %u\n", seed);
 
     // Allocate buffers (static for bare-metal)
     // Ensure alignment for potential DMA requirements by NIC
@@ -102,178 +165,161 @@ int main() {
 
     // Buffers to hold the input data payloads (as 32-bit elements)
     static uint32_t input_elements[NUM_PACKETS][NUM_ELEMENTS] __attribute__((aligned(64)));
-
-    // Buffer to hold the *expected* data payload result after processing
-    // This will store the running sum needed for subsequent calculations
-    static uint32_t expected_payload_elements[NUM_ELEMENTS] __attribute__((aligned(64)));
-    // Buffer to hold the expected payload from the *previous* step (needed for calculation)
-    static uint32_t previous_expected_payload_elements[NUM_ELEMENTS] __attribute__((aligned(64)));
-
+    static uint32_t expected_outputs[NUM_PACKETS][NUM_ELEMENTS] __attribute__((aligned(64)));
+    static int packet_order[NUM_PACKETS];
 
     // --- 1. NIC Initialization (Implicit) ---
     printf("SimpleNIC assumed ready after reset.\n");
     uint64_t mac = nic_macaddr();
     printf("NIC MAC Address: %012lx\n", (unsigned long)mac);
 
+    // --- 2. Run Multiple Test Sets ---
+    for (int test_set = 0; test_set < NUM_TEST_SETS; test_set++) {
+        printf("\n=== Starting Test Set %d ===\n", test_set + 1);
 
-    // --- 2. Prepare Input Data Payloads ---
-    printf("Preparing distinct input data for %d packets...\n", NUM_PACKETS);
-    for (int p = 0; p < NUM_PACKETS; ++p) {
-        for (int i = 0; i < NUM_ELEMENTS; ++i) {
-            // Simple pattern: packet_index * 1000 + element_index + 1
-            input_elements[p][i] = (uint32_t)((p * 1000) + i + 1);
+        // Generate random packet order for this test set
+        generate_random_permutation(packet_order, NUM_PACKETS);
+        printf("Packet order for this set: ");
+        for (int i = 0; i < NUM_PACKETS; i++) {
+            printf("%d ", packet_order[i]);
         }
-        // Optional: Print the first few elements of each input packet
-        // print_elements("Input Data Pkt", input_elements[p], 8); // Print first 8
-    }
-    printf("Input data preparation complete.\n");
+        printf("\n");
 
-
-    // --- 3. Send/Receive/Verify Loop ---
-    printf("\n--- Starting Packet Send/Receive Loop ---\n");
-    for (int p = 0; p < NUM_PACKETS; ++p) {
-        uint8_t current_input_level = (uint8_t)p; // Packet 0 has level 0, etc.
-        uint8_t expected_output_level = current_input_level + 1;
-
-        printf("\nProcessing Packet %d (Input Level: %u)...\n", p, current_input_level);
-
-        // --- 3a. Construct TX Packet ---
-        memset(tx_buf, 0, BUF_SIZE); // Clear buffer first
-
-        // Set Metadata (Bytes 0-7)
-        tx_buf[0] = (uint8_t)(META_COLL_ID & 0xFF);        // Coll ID LSB
-        tx_buf[1] = (uint8_t)((META_COLL_ID >> 8) & 0xFF); // Coll ID MSB
-        tx_buf[2] = META_COLL_TYPE;                        // Type
-        tx_buf[3] = META_OP;                               // Operation
-        tx_buf[4] = 0x00;                                  // Empty
-        tx_buf[5] = 0x00;                                  // Empty
-        tx_buf[6] = MAX_RECURSION_LEVEL;                   // Max Level
-        tx_buf[7] = current_input_level;                   // Current Level
-
-        // Copy Data Payload (elements start after metadata)
-        memcpy(tx_buf + METADATA_LEN, input_elements[p], DATA_PAYLOAD_LEN);
-
-        // Optional: Print TX buffer
-        #if DEBUG_PRINT_PACKETS
-            print_buf_hex("TX Buf (Packet)", tx_buf, TOTAL_PACKET_LEN);
-            //print_buf_hex("TX Buf (Metadata)", tx_buf, METADATA_LEN);
-            //print_elements("TX Payload Elements", (uint32_t*)(tx_buf + METADATA_LEN), NUM_ELEMENTS);
-        #endif
-
-        // --- 3b. Calculate Expected RX Packet ---
-        memset(expected_rx_buf, 0, BUF_SIZE);
-
-        // Calculate Expected Metadata
-        expected_rx_buf[0] = tx_buf[0]; // Copy most metadata from TX
-        expected_rx_buf[1] = tx_buf[1];
-        expected_rx_buf[2] = tx_buf[2];
-        expected_rx_buf[3] = tx_buf[3];
-        expected_rx_buf[4] = 0x00;
-        expected_rx_buf[5] = 0x00;
-        expected_rx_buf[6] = MAX_RECURSION_LEVEL;
-        expected_rx_buf[7] = expected_output_level; // *** Output Level is incremented ***
-
-        // Calculate Expected Data Payload
-        printf("Calculating expected output payload (Input Level %u)...\n", current_input_level);
-        if (current_input_level == 0) {
-            // Level 0: Output payload is just the input payload
-            memcpy(expected_payload_elements, input_elements[0], DATA_PAYLOAD_LEN);
-            printf("  Level 0: Expected payload = Input payload of Pkt 0.\n");
-        } else {
-            // Level > 0: Output is input[p] + previous_expected_payload
-            // 'previous_expected_payload_elements' holds the expected output from the *previous* packet (which corresponds to storage[p-1])
-            printf("  Level >0: Expected payload = Input payload Pkt %d + Prev Expected Payload (from Pkt %d output).\n", p, p-1);
+        // Prepare input data for this test set
+        for (int p = 0; p < NUM_PACKETS; ++p) {
             for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                // Perform element-wise addition (watch for overflow if not intended)
-                expected_payload_elements[i] = input_elements[p][i] + previous_expected_payload_elements[i];
+                input_elements[p][i] = (uint32_t)((test_set * 10000) + (p * 1000) + i + 1);
             }
         }
 
-        // Copy calculated payload elements into the expected RX buffer
-        memcpy(expected_rx_buf + METADATA_LEN, expected_payload_elements, DATA_PAYLOAD_LEN);
-
-        // Optional: Print Expected RX Buffer
-        #if DEBUG_PRINT_PACKETS
-            print_buf_hex("Expected RX Buf (Packet)", expected_rx_buf, TOTAL_PACKET_LEN);
-            //print_buf_hex("Expected RX Buf (Metadata)", expected_rx_buf, METADATA_LEN);
-            //print_elements("Expected RX Payload Elements", (uint32_t*)(expected_rx_buf + METADATA_LEN), NUM_ELEMENTS);
-        #endif
-
-
-        // --- 3c. Send the Packet ---
-        printf("Sending packet %d using nic_send()...\n", p);
-        nic_send(tx_buf, (unsigned long)TOTAL_PACKET_LEN);
-        printf("Packet %d sent.\n", p);
-
-
-        // --- 3d. Receive the Packet ---
-        printf("Attempting to receive packet %d using nic_recv()...\n", p);
-        memset(rx_buf, 0, BUF_SIZE); // Clear RX buffer before receive
-        int received_len = nic_recv(rx_buf);
-
-
-        // --- 3e. Verify Received Packet ---
-        if (received_len <= 0) {
-            printf("ERROR (Packet %d): nic_recv returned non-positive length: %d.\n", p, received_len);
-            sim_fail(10 + p); // Failure code based on packet index
+        // Pre-calculate and store all expected outputs for each level
+        // Level 0: Just store input data
+        memcpy(expected_outputs[0], input_elements[0], DATA_PAYLOAD_LEN);
+        
+        // Level 1 to MAX_RECURSION_LEVEL: Add previous level's output
+        for (int level = 1; level <= MAX_RECURSION_LEVEL; level++) {
+            for (int i = 0; i < NUM_ELEMENTS; i++) {
+                expected_outputs[level][i] = input_elements[level][i] + expected_outputs[level-1][i];
+            }
         }
 
-        printf("Packet %d received (Length: %d bytes).\n", p, received_len);
-        // Optional: Print actual received buffer
-        #if DEBUG_PRINT_PACKETS
-            print_buf_hex("Actual RX Buf (Packet)", rx_buf, (size_t)received_len);
-            //print_buf_hex("Actual RX Buf (Metadata)", rx_buf, METADATA_LEN);
-            //print_elements("Actual RX Payload Elements", (uint32_t*)(rx_buf + METADATA_LEN), NUM_ELEMENTS);
-        #endif
+        // --- Phase 1: Send all packets in random order ---
+        printf("\n--- Sending all packets ---\n");
+        for (int i = 0; i < NUM_PACKETS; ++i) {
+            int p = packet_order[i];
+            uint8_t current_input_level = (uint8_t)p;
 
+            printf("Sending Packet %d (Level %u) in position %d...\n", 
+                   p, current_input_level, i);
 
-        // Check 1: Correct Length?
-        if (received_len != TOTAL_PACKET_LEN) {
-            printf("ERROR (Packet %d): Received packet length mismatch! Expected %d, Got %d\n",
-                   p, TOTAL_PACKET_LEN, received_len);
-            sim_fail(20 + p);
-        } else {
-             printf("  Length check OK.\n");
+            // Construct TX Packet
+            memset(tx_buf, 0, BUF_SIZE);
+            tx_buf[0] = (uint8_t)(META_COLL_ID & 0xFF);
+            tx_buf[1] = (uint8_t)((META_COLL_ID >> 8) & 0xFF);
+            tx_buf[2] = META_COLL_TYPE;
+            tx_buf[3] = META_OP;
+            tx_buf[4] = 0x00;
+            tx_buf[5] = 0x00;
+            tx_buf[6] = MAX_RECURSION_LEVEL;
+            tx_buf[7] = current_input_level;
+
+            memcpy(tx_buf + METADATA_LEN, input_elements[p], DATA_PAYLOAD_LEN);
+
+            // Send packet
+            nic_send(tx_buf, (unsigned long)TOTAL_PACKET_LEN);
+
+            #if DEBUG_PRINT_PACKETS
+                printf("\n--- Sent Packet Details ---\n");
+                print_packet_metadata("TX", tx_buf);
+                print_packet_data("TX", tx_buf);
+            #endif
         }
+        printf("All packets sent.\n");
 
-        // Check 2: Correct Data (Metadata + Payload)?
-        if (memcmp(rx_buf, expected_rx_buf, TOTAL_PACKET_LEN) != 0) {
-            printf("ERROR (Packet %d): Received packet data mismatch!\n", p);
-            // Find first mismatch for debugging
-            for(int i=0; i < TOTAL_PACKET_LEN; ++i) {
-                if (rx_buf[i] != expected_rx_buf[i]) {
-                    printf("  Mismatch at byte %d: Expected 0x%02x, Got 0x%02x\n",
-                           i, expected_rx_buf[i], rx_buf[i]);
-                    if (i >= METADATA_LEN) {
-                        int element_idx = (i - METADATA_LEN) / BYTES_PER_ELEMENT;
-                        int byte_in_elem = (i - METADATA_LEN) % BYTES_PER_ELEMENT;
-                        printf("    (Element %d, Byte %d)\n", element_idx, byte_in_elem);
-                        // Also print the full expected/actual elements
-                        uint32_t* rx_elem_ptr = (uint32_t*)(rx_buf + METADATA_LEN);
-                        uint32_t* exp_elem_ptr = (uint32_t*)(expected_rx_buf + METADATA_LEN);
-                        printf("    Expected Element: 0x%08x, Got Element: 0x%08x\n", exp_elem_ptr[element_idx], rx_elem_ptr[element_idx]);
+        // --- Phase 2: Receive and verify all responses ---
+        printf("\n--- Receiving and verifying responses ---\n");
+        int responses_received = 0;
+        int received_levels[NUM_PACKETS] = {0}; // Track which levels we've received
 
-                    } else {
-                        printf("    (Metadata byte)\n");
+        while (responses_received < NUM_PACKETS) {
+            // Receive a response
+            memset(rx_buf, 0, BUF_SIZE);
+            int received_len = nic_recv(rx_buf);
+
+            if (received_len <= 0) {
+                printf("ERROR: nic_recv returned non-positive length: %d\n", received_len);
+                sim_fail(100 + test_set);
+            }
+
+            if (received_len != TOTAL_PACKET_LEN) {
+                printf("ERROR: Received packet length mismatch! Expected %d, Got %d\n",
+                       TOTAL_PACKET_LEN, received_len);
+                sim_fail(200 + test_set);
+            }
+
+            // Extract level from response metadata
+            uint8_t response_level = rx_buf[7];
+            printf("Received response for level %u\n", response_level);
+
+            // Verify this level hasn't been received before
+            if (received_levels[response_level-1]) {
+                printf("ERROR: Duplicate response received for level %u\n", response_level);
+                sim_fail(300 + test_set);
+            }
+            received_levels[response_level-1] = 1;
+
+            // Construct expected response using the pre-calculated expected output
+            memset(expected_rx_buf, 0, BUF_SIZE);
+            // Construct metadata for expected response
+            expected_rx_buf[0] = (uint8_t)(META_COLL_ID & 0xFF);
+            expected_rx_buf[1] = (uint8_t)((META_COLL_ID >> 8) & 0xFF);
+            expected_rx_buf[2] = META_COLL_TYPE;
+            expected_rx_buf[3] = META_OP;
+            expected_rx_buf[4] = 0x00;
+            expected_rx_buf[5] = 0x00;
+            expected_rx_buf[6] = MAX_RECURSION_LEVEL;
+            expected_rx_buf[7] = response_level;
+            
+            // Use the pre-calculated expected output for this level
+            memcpy(expected_rx_buf + METADATA_LEN, expected_outputs[response_level-1], DATA_PAYLOAD_LEN);
+
+            #if DEBUG_PRINT_PACKETS
+                printf("\n--- Received Packet Details ---\n");
+                print_packet_metadata("RX", rx_buf);
+                print_packet_data("RX", rx_buf);
+                
+                printf("\n--- Expected Packet Details ---\n");
+                print_packet_metadata("Expected", expected_rx_buf);
+                print_packet_data("Expected", expected_rx_buf);
+            #endif
+
+            // Verify response
+            if (memcmp(rx_buf, expected_rx_buf, TOTAL_PACKET_LEN) != 0) {
+                printf("ERROR: Response data mismatch for level %u!\n", response_level);
+                for(int i=0; i < TOTAL_PACKET_LEN; ++i) {
+                    if (rx_buf[i] != expected_rx_buf[i]) {
+                        printf("  Mismatch at byte %d: Expected 0x%02x, Got 0x%02x\n",
+                               i, expected_rx_buf[i], rx_buf[i]);
+                        if (i >= METADATA_LEN) {
+                            int element_idx = (i - METADATA_LEN) / BYTES_PER_ELEMENT;
+                            printf("    (Element %d)\n", element_idx);
+                        } else {
+                            printf("    (Metadata byte)\n");
+                        }
+                        break;
                     }
-                    break; // Only show first mismatch
                 }
+                sim_fail(400 + test_set);
             }
-            sim_fail(30 + p);
-        } else {
-             printf("  Data content check OK.\n");
+
+            printf("Response for level %u verified successfully.\n", response_level);
+            responses_received++;
         }
 
-        // --- 3f. Prepare for Next Iteration ---
-        // Copy the payload we just calculated/verified into the 'previous' buffer
-        // This becomes the input for the *next* iteration's addition step.
-        memcpy(previous_expected_payload_elements, expected_payload_elements, DATA_PAYLOAD_LEN);
+        printf("=== Test Set %d Completed Successfully ===\n", test_set + 1);
+    }
 
-    } // End of packet loop
-
-    // --- 4. Report Success ---
-    printf("\n--- All %d Packets Processed and Verified Successfully ---\n", NUM_PACKETS);
-    sim_pass(); // Signal success to simulator
-
-    return 0; // Should not be reached
+    printf("\n--- All %d Test Sets Completed Successfully ---\n", NUM_TEST_SETS);
+    sim_pass();
+    return 0;
 }
