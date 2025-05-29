@@ -30,7 +30,7 @@ include libgloss.mk
 PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            streaming-passthrough streaming-fir nvdla spiflashread spiflashwrite fft gcd \
            hello mt-hello symmetric \
-		   collective/packetmodifier
+		   collective/packetmodifier collective/recursivedoubling
 
 
 .DEFAULT_GOAL := default
@@ -62,7 +62,7 @@ spiflash.img: spiflash.py
 
 .PHONY: clean
 clean:
-	rm -f *.riscv *.o *.dump
+	rm -f *.riscv *.o *.dump */*.riscv
 	$(if $(libgloss),rm -rf $(libgloss_builddir)/)
 
 .PHONY: default
