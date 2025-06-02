@@ -360,3 +360,15 @@ class FireSimLeanGemminiRocketMMIOOnlyConfig extends Config(
   new WithDefaultMemModel ++
   new WithFireSimConfigTweaks ++
   new chipyard.LeanGemminiRocketConfig)
+
+class FireSimRecursiveDoublingConfig extends Config(
+  new icenet.collective.WithRecursiveDoubling ++
+  new chipyard.harness.WithRecursiveDoublingHarness ++
+  new icenet.WithIceNIC ++
+  new boom.common.WithNLargeBooms(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new WithDefaultFireSimBridges ++
+  new WithDefaultMemModel ++
+  new WithFireSimConfigTweaks ++
+  new chipyard.config.AbstractConfig
+)
