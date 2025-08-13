@@ -76,3 +76,10 @@ class RecursiveDoublingConfig extends Config(
   new boom.common.WithNLargeBooms(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig)
+
+class SimpleDmaControllerConfig extends Config(
+  new chipyard.harness.WithSimpleDmaControllerHarness ++ // Add the custom harness binder
+  new icenet.WithIceNIC ++                         // Add the NIC itself
+  new boom.common.WithNLargeBooms(1) ++            // Add a BOOM core
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig)
