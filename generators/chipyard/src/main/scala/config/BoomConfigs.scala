@@ -83,3 +83,11 @@ class SimpleDmaControllerConfig extends Config(
   new boom.common.WithNLargeBooms(1) ++            // Add a BOOM core
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig)
+
+class RecursiveDoublingWithDMAConfig extends Config(
+  new icenet.collective.WithRecursiveDoublingWithDMA ++         // Add the custom module
+  new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++   // Add the custom harness for the module
+  new icenet.WithIceNIC ++                            // Add the NIC
+  new boom.common.WithNLargeBooms(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new chipyard.config.AbstractConfig)

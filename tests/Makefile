@@ -30,7 +30,8 @@ include libgloss.mk
 PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            streaming-passthrough streaming-fir nvdla spiflashread spiflashwrite fft gcd \
            hello mt-hello symmetric \
-		   collective/packetmodifier collective/recursivedoubling
+		   collective/packetmodifier collective/recursivedoubling collective/simpledmacontrollertest \
+		   collective/recursivedoublingdma
 
 
 .DEFAULT_GOAL := default

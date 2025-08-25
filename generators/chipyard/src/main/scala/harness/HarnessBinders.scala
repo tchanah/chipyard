@@ -381,3 +381,21 @@ class WithSimpleDmaControllerHarness extends HarnessBinder({
     }
   }
 })
+
+class WithRecursiveDoublingWithDMAHarness extends HarnessBinder({
+  case (th: HasHarnessInstantiators, port: NICPort, chipId: Int) => {
+    implicit val p: Parameters = th.p
+
+    println(s"[WithRecursiveDoublingWithDMAHarness] Matched NICPort ${chipId}. Applying RecursiveDoublingWithDMAConnector.")
+    println(s"[WithRecursiveDoublingWithDMAHarness] port.params = ${port.params}")
+    println(s"[WithRecursiveDoublingWithDMAHarness] port.io.clock = ${port.io.clock}")
+    
+    withClock(port.io.clock) {
+      // Apply the connector logic defined in NIC.scala
+      icenet.RecursiveDoublingWithDMAConnector.connect(
+        port.io.bits,
+        port.params.asInstanceOf[NICConfig]
+      )
+    }
+  }
+})
