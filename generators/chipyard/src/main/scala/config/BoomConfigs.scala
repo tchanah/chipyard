@@ -85,7 +85,7 @@ class SimpleDmaControllerConfig extends Config(
   new chipyard.config.AbstractConfig)
 
 class RecursiveDoublingWithDMAConfig extends Config(
-  new icenet.collective.WithRecursiveDoublingWithDMA ++         // Add the custom module
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false) ++  // Add the custom module
   new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++   // Add the custom harness for the module
   new icenet.WithIceNIC ++                            // Add the NIC
   new boom.common.WithNLargeBooms(1) ++

@@ -23,7 +23,7 @@ ARCHFLAGS = -march=$(ARCH) -mabi=$(ABI)
 
 CFLAGS  = -std=gnu99 -O2 -fno-common -fno-builtin-printf -Wall
 CFLAGS += $(ARCHFLAGS)
-LDFLAGS = -static
+LDFLAGS = -static -Wl,-u,_printf_float
 
 include libgloss.mk
 
@@ -31,7 +31,7 @@ PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            streaming-passthrough streaming-fir nvdla spiflashread spiflashwrite fft gcd \
            hello mt-hello symmetric \
 		   collective/packetmodifier collective/recursivedoubling collective/simpledmacontrollertest \
-		   collective/recursivedoublingdma
+		   collective/recursivedoublingdma collective/recursivedoublingwithdmafp
 
 
 .DEFAULT_GOAL := default
