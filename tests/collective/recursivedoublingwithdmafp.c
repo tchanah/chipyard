@@ -32,9 +32,9 @@ static inline void sim_fail(uint64_t code) {
 #define NUM_PACKETS 4         // Testing levels 0, 1, 2, 3
 #define NUM_ELEMENTS 256      // As per module config
 #define BYTES_PER_ELEMENT 4   // As per module config (32-bit elements)
-#define METADATA_LEN 8        // Fixed metadata size
+#define METADATA_LEN 16        // Fixed metadata size
 #define DATA_PAYLOAD_LEN (NUM_ELEMENTS * BYTES_PER_ELEMENT) // 256 * 4 = 1024
-#define TOTAL_PACKET_LEN (METADATA_LEN + DATA_PAYLOAD_LEN)  // 8 + 1024 = 1032
+#define TOTAL_PACKET_LEN (METADATA_LEN + DATA_PAYLOAD_LEN)  // 16 + 1024 = 1040
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
 #define NUM_TEST_SETS 24  // Test all 4! = 24 possible packet orderings
@@ -123,13 +123,22 @@ void calculate_expected_output(uint32_t* expected, const uint32_t* input,
 
 // Add these debug print functions after the existing helper functions
 void print_packet_metadata(const char* prefix, const uint8_t* buf) {
-    printf("%s Metadata:\n", prefix);
+    printf("%s Metadata (16 bytes):\n", prefix);
+    
+    // --- Word 0 ---
     printf("  Collective ID: 0x%04x\n", (buf[1] << 8) | buf[0]);
     printf("  Collective Type: 0x%02x\n", buf[2]);
     printf("  Operation: 0x%02x\n", buf[3]);
     printf("  Reserved: 0x%02x%02x\n", buf[4], buf[5]);
     printf("  Max Level: %u\n", buf[6]);
     printf("  Current Level: %u\n", buf[7]);
+
+    // --- Word 1 ---
+    uint32_t chunk_index, total_chunks;
+    memcpy(&chunk_index, buf + 8, sizeof(uint32_t));
+    memcpy(&total_chunks, buf + 12, sizeof(uint32_t));
+    printf("  Chunk Index: %u\n", chunk_index);
+    printf("  Total Chunks: %u\n", total_chunks);
 }
 
 void print_packet_data(const char* prefix, const uint8_t* buf) {
@@ -257,6 +266,12 @@ int main() {
             tx_buf[6] = MAX_RECURSION_LEVEL;
             tx_buf[7] = current_input_level;
 
+            // --- Word 1 (Offset 8): New Extended Metadata ---
+            uint32_t chunk_index = 0;
+            uint32_t total_chunks = 1;
+            memcpy(tx_buf + 8, &chunk_index, sizeof(uint32_t));
+            memcpy(tx_buf + 12, &total_chunks, sizeof(uint32_t));
+
             memcpy(tx_buf + METADATA_LEN, input_elements[p], DATA_PAYLOAD_LEN);
 
             // Send packet
@@ -315,6 +330,12 @@ int main() {
             expected_rx_buf[5] = 0x00;
             expected_rx_buf[6] = MAX_RECURSION_LEVEL;
             expected_rx_buf[7] = response_level;
+
+            // --- Word 1 (Offset 8): Expected Extended Metadata ---
+            uint32_t expected_chunk_index = 0;
+            uint32_t expected_total_chunks = 1;
+            memcpy(expected_rx_buf + 8, &expected_chunk_index, sizeof(uint32_t));
+            memcpy(expected_rx_buf + 12, &expected_total_chunks, sizeof(uint32_t));
             
             // Use the pre-calculated expected output for this level
             memcpy(expected_rx_buf + METADATA_LEN, expected_outputs[response_level-1], DATA_PAYLOAD_LEN);
