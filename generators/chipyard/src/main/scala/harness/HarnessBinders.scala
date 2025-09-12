@@ -391,9 +391,9 @@ class WithRecursiveDoublingWithDMAHarness extends HarnessBinder({
     println(s"[WithRecursiveDoublingWithDMAHarness] port.io.clock = ${port.io.clock}")
     
     withClock(port.io.clock) {
-      // Apply the connector logic defined in NIC.scala
+      val nicio = icenet.NICIO(port.io.bits.asInstanceOf[icenet.NICIOvonly])
       icenet.RecursiveDoublingWithDMAConnector.connect(
-        port.io.bits,
+        nicio,
         port.params.asInstanceOf[NICConfig]
       )
     }
