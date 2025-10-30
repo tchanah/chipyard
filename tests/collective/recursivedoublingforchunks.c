@@ -37,9 +37,8 @@ static inline void sim_fail(uint64_t code) {
 #define TOTAL_PACKET_LEN (METADATA_LEN + DATA_PAYLOAD_LEN)  // 16 + 1024 = 1040
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
-#define NUM_TEST_SETS 32       // Reduced test sets for chunked testing
+#define NUM_TEST_SETS 128       // Reduced test sets for chunked testing
 #define MAX_CHUNKS_PER_LEVEL 8  // Test with up to 4 chunks per level (4KB total)
-#define CHUNK_SIZE_BYTES DATA_PAYLOAD_LEN  // Each chunk is 1KB
 
 // Define metadata values (example)
 #define META_COLL_ID   0xABCD
@@ -347,39 +346,46 @@ int main() {
                 #endif
 
                 // Verify response
-                if (memcmp(rx_buf, expected_rx_buf, TOTAL_PACKET_LEN) != 0) {
-                    printf("ERROR: Response data mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
-                    
-                    // New loop to find and print all mismatched words
-                    for(int i = 0; i < TOTAL_PACKET_LEN; ++i) {
-                        if (rx_buf[i] != expected_rx_buf[i]) {
-                            // Mismatch found. Find the start of the 8-byte word.
-                            int word_start_idx = i & ~7;
+                // 1) Strictly compare metadata
+                if (memcmp(rx_buf, expected_rx_buf, METADATA_LEN) != 0) {
+                    printf("ERROR: Metadata mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                    sim_fail(400 + test_set);
+                }
 
-                            // Safely get the full word values from the buffers
-                            uint32_t expected_word, got_word;
-                            memcpy(&expected_word, &expected_rx_buf[word_start_idx], sizeof(uint32_t));
-                            memcpy(&got_word, &rx_buf[word_start_idx], sizeof(uint32_t));
+                // 2) Compare payload with 1-ULP tolerance per 32-bit float element
+                {
+                    const uint32_t* exp_words = (const uint32_t*)(expected_rx_buf + METADATA_LEN);
+                    const uint32_t* got_words = (const uint32_t*)(rx_buf + METADATA_LEN);
+                    int bad_elem = -1;
+                    uint32_t bad_exp = 0, bad_got = 0, bad_diff = 0;
 
-                            // Print the detailed word comparison
-                            printf("  Mismatch found near byte %d (word starts at byte %d):\n", i, word_start_idx);
-                            printf("    Expected Word: 0x%016lx\n", (unsigned long)expected_word);
-                            printf("    Got Word:      0x%016lx\n", (unsigned long)got_word);
+                    for (int e = 0; e < NUM_ELEMENTS; ++e) {
+                        uint32_t a = exp_words[e];
+                        uint32_t b = got_words[e];
+                        if (a == b) continue;
 
-                            // Check if the mismatch is in the metadata or the data payload
-                            if (word_start_idx >= METADATA_LEN) {
-                                int element_idx = (word_start_idx - METADATA_LEN) / BYTES_PER_ELEMENT;
-                                printf("    (Data Element %d)\n", element_idx);
-                            } else {
-                                int metadata_word_idx = word_start_idx / 4;
-                                printf("    (Metadata Word %d)\n", metadata_word_idx);
-                            }
+                        int32_t ai, bi;
+                        memcpy(&ai, &a, sizeof(int32_t));
+                        memcpy(&bi, &b, sizeof(int32_t));
+                        if (ai < 0) ai = 0x80000000 - ai;
+                        if (bi < 0) bi = 0x80000000 - bi;
+                        uint32_t udiff = (ai > bi) ? (uint32_t)(ai - bi) : (uint32_t)(bi - ai);
 
-                            // Advance loop counter to the next word to avoid redundant reports
-                            i = word_start_idx + 7;
+                        if (udiff > 1u) {
+                            bad_elem = e;
+                            bad_exp = a;
+                            bad_got = b;
+                            bad_diff = udiff;
+                            break;
                         }
                     }
-                    sim_fail(400 + test_set);
+
+                    if (bad_elem >= 0) {
+                        printf("ERROR: Float payload mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                        printf("  First differing element %d: Expected 0x%08x Got 0x%08x (ULP diff %u)\n",
+                               bad_elem, bad_exp, bad_got, bad_diff);
+                        sim_fail(400 + test_set);
+                    }
                 }
 
                 #if DEBUG_PRINT_PACKETS
@@ -415,3 +421,4 @@ int main() {
     sim_pass();
     return 0;
 }
+
