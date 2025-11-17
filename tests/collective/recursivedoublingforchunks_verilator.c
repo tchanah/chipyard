@@ -38,37 +38,21 @@ static inline void sim_fail(uint64_t code) {
 #define TOTAL_PACKET_LEN (ETH_HEADER_LEN + METADATA_LEN + DATA_PAYLOAD_LEN)  // 16 + 16 + 1024 = 1056
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
-#define NUM_TEST_SETS  1024      // Reduced test sets for chunked testing
-#define MAX_CHUNKS_PER_LEVEL 1024  // Test with up to 4 chunks per level (4KB total)
-#define MAX_CHUNKS_IN_FLIGHT 32  // Maximum number of chunk indices concurrently "in flight"
-#define MAX_CHUNK_SPREAD 8      // Allow earliest chunk and next chunk index to interleave across modules
-
-#if MAX_CHUNKS_IN_FLIGHT < 1
-#error "MAX_CHUNKS_IN_FLIGHT must be at least 1"
-#endif
-
-#if MAX_CHUNKS_IN_FLIGHT > MAX_CHUNKS_PER_LEVEL
-#error "MAX_CHUNKS_IN_FLIGHT cannot exceed MAX_CHUNKS_PER_LEVEL"
-#endif
-
-#if MAX_CHUNK_SPREAD < 0
-#error "MAX_CHUNK_SPREAD must be non-negative"
-#endif
-
-#if MAX_CHUNK_SPREAD >= MAX_CHUNKS_PER_LEVEL
-#error "MAX_CHUNK_SPREAD must be smaller than MAX_CHUNKS_PER_LEVEL"
-#endif
+#define NUM_TEST_SETS 1       // Reduced test sets for chunked testing
+#define MAX_CHUNKS_PER_LEVEL 4  // Test with up to 4 chunks per level (4KB total)
 
 // Define metadata values (example)
 #define META_COLL_ID   0xABCD
 #define META_COLL_TYPE 0x01
 #define META_OP        0x05 // e.g., 5 means ADD
 
-#define DEBUG_PRINT_PACKETS 0 // Set to 1 to print full TX/RX packets, 0 to disable
-
+#define DEBUG_PRINT_PACKETS 1 // Set to 1 to print full TX/RX packets, 0 to disable
+#define VERIFY_MAC_ROUTING 1   // Set to 1 to verify MAC routing logic
 
 // MAC address constants (matching hardware)
+#define BASE_MAC 0x00126D000000ULL  // Base MAC: 00:12:6D:00:00:00
 #define TEST_NODE_RANK 0            // Node rank for this test (0-7 for 8 nodes)
+#define TEST_PYTORCH_MAC 0x00126D0000FFULL  // Simulated PyTorch source MAC
 
 // Check buffer size at compile time (optional)
 #if BUF_SIZE < TOTAL_PACKET_LEN
@@ -76,6 +60,30 @@ static inline void sim_fail(uint64_t code) {
 #endif
 
 // --- Helper Functions ---
+
+// Calculate partner rank for recursive doubling: partner = myRank XOR (1 << level)
+// This matches the hardware logic in RecursiveDoublingWithDMA.scala
+static inline uint8_t calculate_partner_rank(uint8_t level, uint8_t my_rank) {
+    uint8_t distance = 1U << level;
+    return my_rank ^ distance;
+}
+
+// Calculate partner MAC address: baseMac | partnerRank
+// This matches the hardware logic in RecursiveDoublingWithDMA.scala
+static inline uint64_t calculate_partner_mac(uint8_t level, uint8_t my_rank) {
+    uint8_t partner_rank = calculate_partner_rank(level, my_rank);
+    return BASE_MAC | (uint64_t)partner_rank;
+}
+
+// Print MAC address in readable format
+static void print_mac(const char* label, uint64_t mac) {
+    printf("%s: %02lx:%02lx:%02lx:%02lx:%02lx:%02lx (0x%012lx)\n",
+           label,
+           (unsigned long)((mac >> 40) & 0xFF), (unsigned long)((mac >> 32) & 0xFF), 
+           (unsigned long)((mac >> 24) & 0xFF), (unsigned long)((mac >> 16) & 0xFF), 
+           (unsigned long)((mac >> 8) & 0xFF), (unsigned long)(mac & 0xFF),
+           (unsigned long)mac);
+}
 
 // Generate the nth permutation of numbers 0 to n-1 (0-indexed)
 void generate_nth_permutation(int* perm, int n, int nth) {
@@ -99,120 +107,6 @@ void generate_nth_permutation(int* perm, int n, int nth) {
             perm[j] = perm[j - 1];
         }
         perm[i] = temp;
-    }
-}
-
-static inline uint32_t lcg_step(uint32_t* state) {
-    *state = (*state * 1664525u) + 1013904223u;
-    return *state;
-}
-
-static inline int bounded_random(uint32_t* state, int upper_bound) {
-    if (upper_bound <= 1) {
-        return 0;
-    }
-    return (int)(lcg_step(state) % (uint32_t)upper_bound);
-}
-
-void generate_constrained_packet_order(int* order,
-                                       int num_levels,
-                                       int total_chunks,
-                                       int max_chunks_in_flight,
-                                       uint32_t seed) {
-    if (!order || num_levels <= 0 || total_chunks <= 0) {
-        return;
-    }
-
-    if (max_chunks_in_flight <= 0) {
-        max_chunks_in_flight = 1;
-    }
-
-    if (max_chunks_in_flight > total_chunks) {
-        max_chunks_in_flight = total_chunks;
-    }
-
-    if (max_chunks_in_flight > MAX_CHUNKS_PER_LEVEL) {
-        max_chunks_in_flight = MAX_CHUNKS_PER_LEVEL;
-    }
-
-    const int total_packets = num_levels * total_chunks;
-    uint32_t rng_state = seed ? seed : 0xC001C0DEu;
-
-    typedef struct {
-        int chunk;
-        int level;
-    } packet_cursor_t;
-
-    packet_cursor_t active_packets[MAX_CHUNKS_PER_LEVEL];
-    int active_count = 0;
-    int next_chunk_to_activate = 0;
-    int out_index = 0;
-
-    while (out_index < total_packets) {
-        if (active_count == 0) {
-            if (next_chunk_to_activate >= total_chunks) {
-                break;
-            }
-            active_packets[active_count].chunk = next_chunk_to_activate++;
-            active_packets[active_count].level = 0;
-            active_count++;
-        }
-
-        while (next_chunk_to_activate < total_chunks && active_count < max_chunks_in_flight) {
-            int min_chunk = active_packets[0].chunk;
-            for (int i = 1; i < active_count; ++i) {
-                if (active_packets[i].chunk < min_chunk) {
-                    min_chunk = active_packets[i].chunk;
-                }
-            }
-
-            int max_allowed_chunk = min_chunk + max_chunks_in_flight - 1;
-            if (next_chunk_to_activate > max_allowed_chunk) {
-                break;
-            }
-
-            active_packets[active_count].chunk = next_chunk_to_activate++;
-            active_packets[active_count].level = 0;
-            active_count++;
-        }
-
-        int min_chunk = active_packets[0].chunk;
-        for (int i = 1; i < active_count; ++i) {
-            if (active_packets[i].chunk < min_chunk) {
-                min_chunk = active_packets[i].chunk;
-            }
-        }
-
-        int span_limit = max_chunks_in_flight > 0 ? (max_chunks_in_flight - 1) : 0;
-        if (span_limit > MAX_CHUNK_SPREAD) {
-            span_limit = MAX_CHUNK_SPREAD;
-        }
-        if (span_limit < 0) {
-            span_limit = 0;
-        }
-
-        int chunk_cutoff = min_chunk + span_limit;
-        int candidate_indices[MAX_CHUNKS_PER_LEVEL];
-        int candidate_count = 0;
-        for (int i = 0; i < active_count; ++i) {
-            if (active_packets[i].chunk <= chunk_cutoff) {
-                candidate_indices[candidate_count++] = i;
-            }
-        }
-
-        int chosen_slot = candidate_indices[bounded_random(&rng_state, candidate_count)];
-        packet_cursor_t selected = active_packets[chosen_slot];
-
-        order[out_index++] = selected.level * total_chunks + selected.chunk;
-
-        if (selected.level + 1 < num_levels) {
-            active_packets[chosen_slot].level = selected.level + 1;
-        } else {
-            active_count--;
-            if (chosen_slot != active_count) {
-                active_packets[chosen_slot] = active_packets[active_count];
-            }
-        }
     }
 }
 
@@ -259,7 +153,7 @@ int main() {
     printf("Starting RecursiveDoubling Bare-Metal Test with SimpleNIC...\n");
     srand(1234);
     fflush(stdout);
-    printf("Running %d test sets with constrained packet ordering\n", NUM_TEST_SETS);
+    printf("Running %d test sets with all possible packet orderings\n", NUM_TEST_SETS);
     printf("Each set: %d levels, %d elements (%d bytes payload per chunk)\n",
            NUM_LEVELS, NUM_ELEMENTS, DATA_PAYLOAD_LEN);
     printf("Max Recursion Level: %d\n", MAX_RECURSION_LEVEL);
@@ -290,6 +184,27 @@ int main() {
     uint64_t mac = nic_macaddr();
     printf("NIC MAC Address: %012lx\n", (unsigned long)mac);
     
+    #if VERIFY_MAC_ROUTING
+    printf("\n--- MAC Routing Verification Setup ---\n");
+    printf("Test Node Rank: %d (configured via +node_rank PlusArg)\n", TEST_NODE_RANK);
+    print_mac("Base MAC", BASE_MAC);
+    print_mac("Test Node MAC", BASE_MAC | TEST_NODE_RANK);
+    print_mac("Simulated PyTorch Source MAC", TEST_PYTORCH_MAC);
+    printf("\nExpected Partner MACs for each level:\n");
+    for (uint8_t level = 1; level <= MAX_RECURSION_LEVEL; level++) {
+        uint64_t partner_mac = calculate_partner_mac(level, TEST_NODE_RANK);
+        uint8_t partner_rank = calculate_partner_rank(level, TEST_NODE_RANK);
+        printf("  Level %d: Partner rank=%d, ", level, partner_rank);
+        print_mac("Partner MAC", partner_mac);
+    }
+    printf("  Level %d (final): Should use stored Level 0 source MAC (0x%012lx)\n", 
+           MAX_RECURSION_LEVEL + 1, (unsigned long)TEST_PYTORCH_MAC);
+    printf("\nNote: Hardware debug prints in NIC.scala will show actual MACs used:\n");
+    printf("  - [EthernetHeaderExtractor] shows source MAC from incoming packets\n");
+    printf("  - [EthernetHeaderPrepender] shows destination MAC for outgoing packets\n");
+    printf("  - Module prints show routing decisions and expected partner MACs\n");
+    printf("Cross-reference hardware prints with expected values above.\n\n");
+    #endif
 
     // --- 2. Run Multiple Test Sets ---
     for (int test_set = 0; test_set < NUM_TEST_SETS; test_set++) {
@@ -305,23 +220,19 @@ int main() {
         
         // Create array of all packets to be sent and randomize the send order
         int total_packets = NUM_LEVELS * total_chunks;
-        int max_chunks_in_flight = MAX_CHUNKS_IN_FLIGHT;
-        if (max_chunks_in_flight > total_chunks) {
-            max_chunks_in_flight = total_chunks;
+        for (int i = 0; i < total_packets; i++) {
+            packet_order[i] = i;
         }
-
-        uint32_t schedule_seed = 0xBADC0DEu ^ (uint32_t)test_set ^ ((uint32_t)total_chunks << 8) ^ (uint32_t)NUM_LEVELS;
-        generate_constrained_packet_order(packet_order,
-                                          NUM_LEVELS,
-                                          total_chunks,
-                                          max_chunks_in_flight,
-                                          schedule_seed);
         
-        printf("Total packets to send: %d (constrained randomized order)\n", total_packets);
-        printf("Send order for test set %d (max %d chunks in flight): ", test_set, max_chunks_in_flight);
-        // for (int i = 0; i < total_packets; i++) {
-        //     printf("%d ", packet_order[i]);
-        // }
+        // Use permutation function to shuffle the send order for this test set
+        // Use test_set as seed for the permutation to get different orderings per test
+        generate_nth_permutation(packet_order, total_packets, test_set);
+        
+        printf("Total packets to send: %d (randomized order)\n", total_packets);
+        printf("Send order for test set %d: ", test_set);
+        for (int i = 0; i < total_packets; i++) {
+            printf("%d ", packet_order[i]);
+        }
         printf("\n");
 
         // Prepare chunked input data for this test set
@@ -403,13 +314,49 @@ int main() {
                     printf("Sending Packet %d/%d (order[%d]=%d): Level %d, Chunk %d\n", packets_sent+1, total_packets_to_send, packets_sent, packet_index, level, chunk);
                 #endif
 
-                // Construct TX Packet (payload only - Ethernet header added automatically by NIC/prepender in FireSim)
+                // Construct TX Packet with Ethernet header
                 memset(tx_buf, 0, BUF_SIZE);
                 
-                // --- Metadata (16 bytes, starting at offset 0) ---
-                // Note: In FireSim, the Ethernet header is added automatically by the NIC/prepender
-                // So we only send the payload (metadata + data)
-                uint8_t *metadata = tx_buf;
+                // --- Ethernet Header (16 bytes: 14 bytes header + 2 bytes padding) ---
+                // For Level 0 packets: from PyTorch (TEST_PYTORCH_MAC) to this node
+                // For Level 1-3 packets: from this node to partner (simulated)
+                uint64_t src_mac, dst_mac;
+                if (level == 0) {
+                    // Level 0: from PyTorch to this node
+                    src_mac = TEST_PYTORCH_MAC;
+                    dst_mac = BASE_MAC | TEST_NODE_RANK;
+                } else {
+                    // Level 1-3: from this node to partner (simulated intermediate packet)
+                    src_mac = BASE_MAC | TEST_NODE_RANK;
+                    uint8_t partner_rank = calculate_partner_rank(level, TEST_NODE_RANK);
+                    dst_mac = BASE_MAC | partner_rank;
+                }
+                
+                // Ethernet header wire format: [padding(2B) | dstmac(6B) | srcmac(6B) | ethType(2B)]
+                // For 64-bit words: word0 = [padding(2B) | dstmac(6B)], word1 = [srcmac(6B) | ethType(2B)]
+                // The extractor does Cat(words.reverse), so word1 comes first, then word0
+                // When bytes are written sequentially and read as 64-bit words in little-endian:
+                //   Word = byte[0] | (byte[1] << 8) | ... | (byte[7] << 56)
+                // So byte[0] is LSB, byte[7] is MSB of the word
+                
+                // Word 0 (bytes 0-7): padding(2) + dstmac(6)
+                // Write in little-endian: LSB first
+                tx_buf[0] = 0x00;   // Padding byte 0 (LSB of word 0)
+                tx_buf[1] = 0x00;   // Padding byte 1
+                for (int i = 0; i < 6; i++) {
+                    tx_buf[2 + i] = (uint8_t)((dst_mac >> (i * 8)) & 0xFF);  // dstmac bytes 0-5 (LSB to MSB)
+                }
+                
+                // Word 1 (bytes 8-15): srcmac(6) + ethType(2)
+                // Write in little-endian: LSB first
+                for (int i = 0; i < 6; i++) {
+                    tx_buf[8 + i] = (uint8_t)((src_mac >> (i * 8)) & 0xFF);  // srcmac bytes 0-5 (LSB to MSB)
+                }
+                tx_buf[14] = 0x00;  // EtherType byte 0 (LSB)
+                tx_buf[15] = 0x00;  // EtherType byte 1 (MSB)
+                
+                // --- Metadata (16 bytes, starting at offset 16) ---
+                uint8_t *metadata = tx_buf + ETH_HEADER_LEN;
                 metadata[0] = (uint8_t)(test_collective_id & 0xFF);
                 metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 metadata[2] = META_COLL_TYPE;
@@ -424,19 +371,30 @@ int main() {
                 memcpy(metadata + 8, &chunk_index, sizeof(uint32_t));
                 memcpy(metadata + 12, &total_chunks, sizeof(uint32_t));
 
-                // --- Data Payload (starting at offset 16, after metadata) ---
-                memcpy(tx_buf + METADATA_LEN, input_elements[level][chunk], DATA_PAYLOAD_LEN);
+                // --- Data Payload (starting at offset 32) ---
+                memcpy(tx_buf + ETH_HEADER_LEN + METADATA_LEN, input_elements[level][chunk], DATA_PAYLOAD_LEN);
 
-                // Calculate payload length (metadata + data, without Ethernet header)
-                // The NIC/prepender will add the Ethernet header automatically
-                const int PAYLOAD_LEN = METADATA_LEN + DATA_PAYLOAD_LEN;  // 16 + 1024 = 1040
+                // Verify MAC addresses in buffer before sending (especially for first packet)
+                uint64_t tx_src_mac_check = 0, tx_dst_mac_check = 0;
+                for (int i = 0; i < 6; i++) {
+                    tx_dst_mac_check |= ((uint64_t)tx_buf[2 + i]) << (i * 8);
+                    tx_src_mac_check |= ((uint64_t)tx_buf[8 + i]) << (i * 8);
+                }
+                if (packets_sent == 0) {
+                    printf("FIRST PACKET TX: Level %d, src_mac=0x%012lx, dst_mac=0x%012lx (expected src=0x%012lx, dst=0x%012lx)\n",
+                           level, (unsigned long)tx_src_mac_check, (unsigned long)tx_dst_mac_check,
+                           (unsigned long)src_mac, (unsigned long)dst_mac);
+                    if (tx_src_mac_check != src_mac || tx_dst_mac_check != dst_mac) {
+                        printf("ERROR: MAC mismatch in TX buffer! Buffer corrupted?\n");
+                    }
+                }
 
-                nic_send(tx_buf, (unsigned long)PAYLOAD_LEN);
+                nic_send(tx_buf, (unsigned long)TOTAL_PACKET_LEN);
 
                 #if DEBUG_PRINT_PACKETS
-                    printf("\n--- Sent Packet Details (payload only, header added by NIC) ---\n");
-                    print_packet_metadata("TX", tx_buf);
-                    print_elements_f("TX", (const uint32_t*)(tx_buf + METADATA_LEN), 8);
+                    printf("\n--- Sent Packet Details ---\n");
+                    print_packet_metadata("TX", tx_buf + ETH_HEADER_LEN);
+                    print_elements_f("TX", (const uint32_t*)(tx_buf + ETH_HEADER_LEN + METADATA_LEN), 8);
                 #endif
 
                 packets_sent++;
@@ -450,18 +408,26 @@ int main() {
                 int received_len = reg_read16(SIMPLENIC_RECV_COMP);
                 asm volatile ("fence");
 
-                // In FireSim: Ethernet header is stripped by network, so we only receive payload
-                const int EXPECTED_PAYLOAD_LEN = METADATA_LEN + DATA_PAYLOAD_LEN;  // 16 + 1024 = 1040
-
-                // Verify that the packet length matches expected payload length
-                if (received_len != EXPECTED_PAYLOAD_LEN) {
+                // Verify that the packet length is what we expect.
+                // Any other length indicates a critical error in the DUT or NIC.
+                if (received_len != TOTAL_PACKET_LEN) {
                     printf("ERROR: Received packet with unexpected length! Expected %d, Got %d\n",
-                           EXPECTED_PAYLOAD_LEN, received_len);
+                           TOTAL_PACKET_LEN, received_len);
                     sim_fail(600 + test_set);
                 }
 
-                // In FireSim: Ethernet header is stripped by network, so payload starts at offset 0
-                uint8_t *rx_payload = rx_buf;
+                // --- Extract and verify Ethernet header MAC addresses ---
+                // Ethernet header format: [padding(2B) | dstmac(6B) | srcmac(6B) | ethType(2B)]
+                // Extract MAC addresses (little-endian byte order)
+                uint64_t rx_dst_mac = 0, rx_src_mac = 0;
+                for (int i = 0; i < 6; i++) {
+                    rx_dst_mac |= ((uint64_t)rx_buf[2 + i]) << (i * 8);  // dstmac bytes 2-7
+                    rx_src_mac |= ((uint64_t)rx_buf[8 + i]) << (i * 8);  // srcmac bytes 8-13
+                }
+                
+                // --- Strip Ethernet header from received packet ---
+                // The prepender adds an Ethernet header to outgoing packets, so we need to skip it
+                uint8_t *rx_payload = rx_buf + ETH_HEADER_LEN;
                 
                 // --- Extract response level from metadata ---
                 uint8_t response_level = rx_payload[7];
@@ -469,6 +435,48 @@ int main() {
                 memcpy(&response_chunk_index, rx_payload + 8, sizeof(uint32_t));
                 memcpy(&response_total_chunks, rx_payload + 12, sizeof(uint32_t));
 
+                #if VERIFY_MAC_ROUTING
+                // Verify MAC addresses based on response level
+                // In single-node Verilator loopback test:
+                // - Packets we send loop back to us
+                // - Source MAC is always this node's MAC (because we sent it)
+                // - Destination MAC is where we originally sent it (partner's MAC for level 1-3)
+                uint64_t this_node_mac = BASE_MAC | TEST_NODE_RANK;
+                uint64_t expected_src_mac = this_node_mac;  // Always our MAC in loopback
+                uint64_t expected_dst_mac;
+                
+                if (response_level == MAX_RECURSION_LEVEL + 1) {
+                    // Level 4 (final): sent back to Level 0 source (PyTorch MAC)
+                    expected_dst_mac = TEST_PYTORCH_MAC;
+                } else {
+                    // Level 1-3: sent to partner node
+                    uint8_t partner_rank = calculate_partner_rank(response_level - 1, TEST_NODE_RANK);
+                    expected_dst_mac = BASE_MAC | partner_rank;
+                }
+                
+                // Verify source MAC is this node's MAC (loopback behavior)
+                if (rx_src_mac != expected_src_mac) {
+                    printf("ERROR: MAC address mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                    printf("  Expected source MAC: 0x%012lx (this node in loopback)\n", (unsigned long)expected_src_mac);
+                    printf("  Received source MAC: 0x%012lx\n", (unsigned long)rx_src_mac);
+                    printf("  Expected dest MAC:   0x%012lx\n", (unsigned long)expected_dst_mac);
+                    printf("  Received dest MAC:   0x%012lx\n", (unsigned long)rx_dst_mac);
+                    sim_fail(500 + test_set);
+                }
+                
+                // Verify destination MAC matches where we sent it
+                if (rx_dst_mac != expected_dst_mac) {
+                    printf("ERROR: Destination MAC mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                    printf("  Expected dest MAC: 0x%012lx\n", (unsigned long)expected_dst_mac);
+                    printf("  Received dest MAC: 0x%012lx\n", (unsigned long)rx_dst_mac);
+                    sim_fail(501 + test_set);
+                }
+                
+                #if DEBUG_PRINT_PACKETS
+                printf("MAC Verification: src=0x%012lx (this node) ✓, dst=0x%012lx (expected=0x%012lx) ✓\n", 
+                       (unsigned long)rx_src_mac, (unsigned long)rx_dst_mac, (unsigned long)expected_dst_mac);
+                #endif
+                #endif
 
                 #if DEBUG_PRINT_PACKETS
                     printf("Received response for level %u, chunk %u\n", response_level, response_chunk_index);
@@ -503,11 +511,11 @@ int main() {
                 #if DEBUG_PRINT_PACKETS
                     printf("\n--- Received Packet Details ---\n");
                     print_packet_metadata("RX", rx_payload);
-                    print_elements_f("RX", (const uint32_t*)(rx_payload + METADATA_LEN), 8);
+                    print_elements_f("RX", (const uint32_t*)(rx_payload + METADATA_LEN), 16);
 
                     printf("\n--- Expected Packet Details ---\n");
                     print_packet_metadata("Expected", expected_rx_buf);
-                    print_elements_f("Expected", (const uint32_t*)(expected_rx_buf + METADATA_LEN), 8);
+                    print_elements_f("Expected", (const uint32_t*)(expected_rx_buf + METADATA_LEN), 16);
                 #endif
 
                 // Verify response

@@ -370,5 +370,26 @@ class FireSimRecursiveDoublingConfig extends Config(
   new WithDefaultFireSimBridges ++
   new WithDefaultMemModel ++
   new WithFireSimConfigTweaks ++
-  new chipyard.config.AbstractConfig
-)
+  new chipyard.config.AbstractConfig)
+
+class FireSimRecursiveDoublingWithDMAConfig extends Config(
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, maxChunks = 1024) ++
+  new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++
+  new icenet.WithIceNIC ++
+  new boom.common.WithNLargeBooms(1) ++
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new WithDefaultFireSimBridges ++
+  new WithDefaultMemModel ++
+  new WithFireSimConfigTweaks ++
+  new chipyard.config.AbstractConfig)
+
+class FireSimRecursiveDoublingWithDMARocketConfig extends Config(
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, maxChunks = 1024) ++
+  new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++
+  new icenet.WithIceNIC ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++ 
+  new chipyard.config.WithSystemBusWidth(128) ++
+  new WithDefaultFireSimBridges ++
+  new WithDefaultMemModel ++
+  new WithFireSimConfigTweaks ++
+  new chipyard.config.AbstractConfig)

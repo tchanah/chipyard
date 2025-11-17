@@ -100,3 +100,11 @@ class ClusteredRocketConfig extends Config(
 class FastRTLSimRocketConfig extends Config(
   new freechips.rocketchip.subsystem.WithoutTLMonitors ++
   new chipyard.RocketConfig)
+
+class RecursiveDoublingWithDMARocketConfig extends Config(
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, maxChunks = 64) ++
+  new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++
+  new icenet.WithIceNIC ++
+  new freechips.rocketchip.subsystem.WithNBigCores(1) ++ 
+  new chipyard.config.WithSystemBusWidth(128) ++ 
+  new chipyard.config.AbstractConfig)
