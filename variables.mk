@@ -227,9 +227,9 @@ MFC_LOWERING_OPTIONS ?= $(build_dir)/.mfc_lowering_options
 #########################################################################################
 # java arguments used in sbt
 #########################################################################################
-JAVA_HEAP_SIZE ?= 8G
+JAVA_HEAP_SIZE ?= 128G
 JAVA_TMP_DIR ?= $(base_dir)/.java_tmp
-export JAVA_TOOL_OPTIONS ?= -Xmx$(JAVA_HEAP_SIZE) -Xss8M -Djava.io.tmpdir=$(JAVA_TMP_DIR)
+export JAVA_TOOL_OPTIONS ?= -Xmx$(JAVA_HEAP_SIZE) -Xss64M -Djava.io.tmpdir=$(JAVA_TMP_DIR)
 
 #########################################################################################
 # default sbt launch command
@@ -302,7 +302,7 @@ GEN_COLLATERAL_DIR ?=$(build_dir)/gen-collateral
 #########################################################################################
 # simulation variables
 #########################################################################################
-TIMEOUT_CYCLES = 10000000
+TIMEOUT_CYCLES = 100000000
 
 # legacy timeout_cycles handling
 timeout_cycles ?=
