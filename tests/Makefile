@@ -32,7 +32,20 @@ PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            hello mt-hello symmetric \
 		   collective/packetmodifier collective/recursivedoubling collective/simpledmacontrollertest \
 		   collective/recursivedoublingdma collective/recursivedoublingwithdmafp \
-		   collective/recursivedoublingforchunks
+		   collective/recursivedoublingforchunks collective/recursivedoublingforchunksveri
+
+# Per-node binaries for 8-node recursive doubling test
+RECURSIVE_DOUBLING_NODES = collective/recursivedoublingforchunks-node0 \
+                           collective/recursivedoublingforchunks-node1 \
+                           collective/recursivedoublingforchunks-node2 \
+                           collective/recursivedoublingforchunks-node3 \
+                           collective/recursivedoublingforchunks-node4 \
+                           collective/recursivedoublingforchunks-node5 \
+                           collective/recursivedoublingforchunks-node6 \
+                           collective/recursivedoublingforchunks-node7
+
+# Add per-node binaries to the main PROGRAMS list so they build by default
+PROGRAMS += $(RECURSIVE_DOUBLING_NODES)
 
 
 .DEFAULT_GOAL := default
@@ -51,6 +64,42 @@ spiflash.img: spiflash.py
 %.o: %.c mmio.h spiflash.h
 	$(GCC) $(CFLAGS) -c $< -o $@
 
+# Build per-node binaries with different NODE_RANK defines
+# Pattern: node0, node1, ..., node7
+collective/recursivedoublingforchunks-node0.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=0 -c $< -o $@
+collective/recursivedoublingforchunks-node1.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=1 -c $< -o $@
+collective/recursivedoublingforchunks-node2.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=2 -c $< -o $@
+collective/recursivedoublingforchunks-node3.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=3 -c $< -o $@
+collective/recursivedoublingforchunks-node4.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=4 -c $< -o $@
+collective/recursivedoublingforchunks-node5.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=5 -c $< -o $@
+collective/recursivedoublingforchunks-node6.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=6 -c $< -o $@
+collective/recursivedoublingforchunks-node7.o: collective/recursivedoublingforchunks.c mmio.h
+	$(GCC) $(CFLAGS) -DNODE_RANK=7 -c $< -o $@
+
+collective/recursivedoublingforchunks-node0.riscv: collective/recursivedoublingforchunks-node0.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node1.riscv: collective/recursivedoublingforchunks-node1.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node2.riscv: collective/recursivedoublingforchunks-node2.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node3.riscv: collective/recursivedoublingforchunks-node3.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node4.riscv: collective/recursivedoublingforchunks-node4.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node5.riscv: collective/recursivedoublingforchunks-node5.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node6.riscv: collective/recursivedoublingforchunks-node6.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+collective/recursivedoublingforchunks-node7.riscv: collective/recursivedoublingforchunks-node7.o $(libgloss)
+	$(GCC) $(LDFLAGS) $< -o $@
+
 %.riscv: %.o $(libgloss)
 	$(GCC) $(LDFLAGS) $< -o $@
 
@@ -67,8 +116,11 @@ clean:
 	rm -f *.riscv *.o *.dump */*.riscv
 	$(if $(libgloss),rm -rf $(libgloss_builddir)/)
 
-.PHONY: default
+.PHONY: default recursivedoublingforchunks-nodes
 default: $(addsuffix .riscv, $(PROGRAMS)) spiflash.img
+
+# Build all 8 node-specific binaries
+recursivedoublingforchunks-nodes: $(addsuffix .riscv, $(RECURSIVE_DOUBLING_NODES))
 
 .PHONY: dumps
 dumps: $(addsuffix .dump, $(PROGRAMS))

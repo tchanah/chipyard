@@ -383,19 +383,34 @@ class WithSimpleDmaControllerHarness extends HarnessBinder({
 })
 
 class WithRecursiveDoublingWithDMAHarness extends HarnessBinder({
-  case (th: HasHarnessInstantiators, port: NICPort, chipId: Int) => {
+  // Restrict to TestHarness (Verilator) only. FireSim logic will be handled in BridgeBinders.scala
+  case (th: TestHarness, port: NICPort, chipId: Int) => {
     implicit val p: Parameters = th.p
 
-    println(s"[WithRecursiveDoublingWithDMAHarness] Matched NICPort ${chipId}. Applying RecursiveDoublingWithDMAConnector.")
+    println(s"[WithRecursiveDoublingWithDMAHarness] Matched NICPort ${chipId}. Applying Verilator Harness.")
     println(s"[WithRecursiveDoublingWithDMAHarness] port.params = ${port.params}")
     println(s"[WithRecursiveDoublingWithDMAHarness] port.io.clock = ${port.io.clock}")
     
     withClock(port.io.clock) {
       val nicio = icenet.NICIO(port.io.bits.asInstanceOf[icenet.NICIOvonly])
+      // Create the switch interface wire
+      val switchio = Wire(new icenet.NICIOvonly)
+      
+      // Pass chipId as the node rank - this is reliable in both Verilator and FireSim
       icenet.RecursiveDoublingWithDMAConnector.connect(
         nicio,
-        port.params.asInstanceOf[NICConfig]
+        switchio, // Pass the switch interface
+        port.params.asInstanceOf[NICConfig],
+        chipId,  // Node rank derived from chipId
+        port.io.clock,
+        th.harnessBinderReset.asBool
       )
+      
+      // Tie off switchio inputs 
+      // We are focusing on FireSim only, and this pattern is not compatible with Verilator.
+      switchio.in.valid := false.B
+      switchio.in.bits := DontCare
+      // switchio.out is driven by the Connector, so we can ignore it (sink it)
     }
   }
 })

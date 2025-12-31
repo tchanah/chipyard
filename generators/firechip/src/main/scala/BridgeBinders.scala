@@ -136,6 +136,48 @@ class WithSuccessBridge extends HarnessBinder({
   }
 })
 
+// ========================================================================================
+// RECURSIVE DOUBLING BRIDGES
+// ========================================================================================
+import icenet.collective.RecursiveDoublingWithDMAKey
+import icenet.{NICIO, NICConfig, NICIOvonly}
+
+class WithRecursiveDoublingBridge extends HarnessBinder({
+  case (th: FireSim, port: NICPort, chipId: Int) => {
+    println(s"[WithRecursiveDoublingBridge] Instantiating Accelerator + Bridge for NICPort $chipId")
+    
+    val nicio = NICIO(port.io.bits)
+    val switchio = Wire(new NICIOvonly)
+    
+    // Instantiate the Accelerator
+    icenet.RecursiveDoublingWithDMAConnector.connect(
+      nicio,
+      switchio,
+      port.params.asInstanceOf[NICConfig],
+      chipId,
+      port.io.clock,
+      th.harnessBinderReset.asBool
+    )(th.p)
+    
+    // Connect Bridge to the Network Interface (switchio)
+    NICBridge(port.io.clock, switchio)(th.p)
+  }
+})
+
+class WithRecursiveDoublingFireSimBridges extends Config(
+  new WithTSIBridgeAndHarnessRAMOverSerialTL ++
+  new WithRecursiveDoublingBridge ++ // Use RD Bridge instead of Standard NIC Bridge
+  new WithUARTBridge ++
+  new WithBlockDeviceBridge ++
+  new WithFASEDBridge ++
+  new WithFireSimMultiCycleRegfile ++
+  new WithFireSimFAME5 ++
+  new WithTracerVBridge ++
+  new WithFireSimIOCellModels
+)
+
+// ========================================================================================
+
 // Shorthand to register all of the provided bridges above
 class WithDefaultFireSimBridges extends Config(
   new WithTSIBridgeAndHarnessRAMOverSerialTL ++
