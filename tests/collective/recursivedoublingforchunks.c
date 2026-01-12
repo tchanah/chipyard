@@ -201,10 +201,8 @@ void print_packet_metadata(const char* prefix, const uint8_t* buf) {
     printf("  Collective ID: 0x%04x\n", (buf[1] << 8) | buf[0]);
     printf("  Collective Type: 0x%02x\n", buf[2]);
     printf("  Operation: 0x%02x\n", buf[3]);
-    uint8_t dst_mac_lowest_byte = buf[4];  // Destination MAC lowest byte (for debugging)
-    uint8_t sender_rank = buf[5];  // Sender rank
-    printf("  Dest MAC lowest byte: 0x%02x (rank+2 if FireSim MAC)\n", dst_mac_lowest_byte);
-    printf("  Sender Rank: %u\n", sender_rank);
+    printf("  Reserved[4]: 0x%02x\n", buf[4]);  // Reserved byte
+    printf("  Reserved[5]: 0x%02x\n", buf[5]);  // Reserved (contains rank in Setup packets only)
     printf("  Max Level: %u\n", buf[6]);
     printf("  Current Level: %u\n", buf[7]);
 
@@ -259,7 +257,7 @@ int send_setup_packet(int rank) {
    meta[0] = 0xFF; meta[1] = 0xFF;  // CollID = 0xFFFF (triggers ACK)
    meta[2] = 0;                      // Type
    meta[3] = META_OP_SETUP;          // Operation: SETUP (0xFE)
-   meta[5] = (uint8_t)rank;          // Sender Rank / New Rank payload
+   meta[5] = (uint8_t)rank;          // New Rank to configure (Setup packets only)
    
    // Pre-post receive buffer for ACK
    reg_write64(SIMPLENIC_RECV_REQ, (uintptr_t)rx_buf_setup);
@@ -279,21 +277,18 @@ int send_setup_packet(int rank) {
            uint8_t *rx_meta = rx_buf_setup + ETH_HEADER_LEN;
            uint16_t coll_id = rx_meta[0] | (rx_meta[1] << 8);
            uint8_t op_code = rx_meta[3];
-           uint8_t confirmed_rank = rx_meta[5];
            uint8_t response_level = rx_meta[7];
            
            // Print full ACK metadata including source MAC
-           printf("ACK Packet: collID=0x%04x, opCode=0x%02x, level=%u, senderRank=%u, srcMAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
-                   coll_id, op_code, response_level, confirmed_rank,
+           // Note: byte 5 is reserved (no longer contains sender rank)
+           printf("ACK Packet: collID=0x%04x, opCode=0x%02x, level=%u, srcMAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                   coll_id, op_code, response_level,
                    rx_buf_setup[8], rx_buf_setup[9], rx_buf_setup[10],
                    rx_buf_setup[11], rx_buf_setup[12], rx_buf_setup[13]);
            
            // Check for Setup ACK: collID=0xFFFF, opCode=0xFE, level=1
            if (coll_id == 0xFFFF && op_code == META_OP_SETUP && response_level == 1) {
-               printf("Setup ACK received! Confirmed rank=%u\n", confirmed_rank);
-               if (confirmed_rank != (uint8_t)rank) {
-                   printf("WARNING: Confirmed rank %u != requested rank %d!\n", confirmed_rank, rank);
-               }
+               printf("Setup ACK received! Rank=%d confirmed by ACK response.\n", rank);
                return 1;  // Success
            } else {
                printf("Ignoring non-ACK packet, continuing wait...\n");
@@ -311,6 +306,10 @@ int send_setup_packet(int rank) {
 // --- Main Test ---
 
 int main(int argc, char *argv[]) {
+
+    // Suppress unused function warning for nic_recv (we use async recv instead)
+    (void)nic_recv;
+
     printf("Starting 8-Node RecursiveDoubling Test (Level 0 -> Level 4)...\n");
     printf("This node will send Level 0 packets and wait for Level 4 responses\n");
     
@@ -532,8 +531,8 @@ int main(int argc, char *argv[]) {
                 metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 metadata[2] = META_COLL_TYPE;
                 metadata[3] = META_OP;
-                metadata[4] = (uint8_t)(dst_mac & 0xFF);
-                metadata[5] = TEST_NODE_RANK;  // Sender rank in reserved byte
+                metadata[4] = 0;  // Reserved
+                metadata[5] = 0;  // Reserved (rank only used in Setup packets)
                 metadata[6] = MAX_RECURSION_LEVEL;
                 metadata[7] = (uint8_t)level;  // Level 0
 
@@ -593,9 +592,8 @@ int main(int argc, char *argv[]) {
 
 
                 #if DEBUG_PRINT_PACKETS
-                    uint8_t received_sender_rank_early = rx_payload[5];  // Sender rank from hardware
-                    printf("Received packet: level=%u, chunk=%u, sender_rank=%u\n", 
-                           response_level, response_chunk_index, received_sender_rank_early);
+                    printf("Received packet: level=%u, chunk=%u, reserved5=0x%02x\n", 
+                           response_level, response_chunk_index, rx_payload[5]);
                 #endif
                 
                 // Ignore intermediate levels (they are routed to other nodes when MAC filtering is correct)
@@ -630,13 +628,12 @@ int main(int argc, char *argv[]) {
                 memset(expected_rx_buf, 0, BUF_SIZE);
                 // Note: rx_payload (after stripping Ethernet header) starts with metadata
                 uint8_t *expected_metadata = expected_rx_buf;
-                uint8_t hw_sender_rank = rx_payload[5];
                 expected_metadata[0] = (uint8_t)(test_collective_id & 0xFF);
                 expected_metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 expected_metadata[2] = META_COLL_TYPE;
                 expected_metadata[3] = META_OP;
-                expected_metadata[4] = (uint8_t)(TEST_NODE_RANK + TESTER_MAC_OFFSET);
-                expected_metadata[5] = hw_sender_rank;
+                expected_metadata[4] = 0;  // Reserved
+                expected_metadata[5] = 0;  // Reserved
                 expected_metadata[6] = MAX_RECURSION_LEVEL;
                 expected_metadata[7] = MAX_RECURSION_LEVEL + 1;  // Expected Level 4 (final) response
 
