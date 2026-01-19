@@ -32,7 +32,7 @@ PROGRAMS = pwm blkdev accum charcount nic-loopback big-blkdev pingd \
            hello mt-hello symmetric \
 		   collective/packetmodifier collective/recursivedoubling collective/simpledmacontrollertest \
 		   collective/recursivedoublingdma collective/recursivedoublingwithdmafp \
-		   collective/recursivedoublingforchunks collective/recursivedoublingforchunksveri
+		   collective/recursivedoublingforchunks collective/recursivedoublingforchunks_verilator
 
 # Per-node binaries for 8-node recursive doubling test
 RECURSIVE_DOUBLING_NODES = collective/recursivedoublingforchunks-node0 \

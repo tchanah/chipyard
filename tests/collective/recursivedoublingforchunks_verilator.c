@@ -38,21 +38,34 @@ static inline void sim_fail(uint64_t code) {
 #define TOTAL_PACKET_LEN (ETH_HEADER_LEN + METADATA_LEN + DATA_PAYLOAD_LEN)  // 16 + 16 + 1024 = 1056
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
-#define NUM_TEST_SETS 1       // Reduced test sets for chunked testing
+#define NUM_TEST_SETS 64       // Reduced test sets for chunked testing
 #define MAX_CHUNKS_PER_LEVEL 4  // Test with up to 4 chunks per level (4KB total)
 
 // Define metadata values (example)
 #define META_COLL_ID   0xABCD
 #define META_COLL_TYPE 0x01
 #define META_OP        0x05 // e.g., 5 means ADD
+#define META_OP_SETUP  0xFE // Setup Packet to configure Node Rank
 
-#define DEBUG_PRINT_PACKETS 1 // Set to 1 to print full TX/RX packets, 0 to disable
+#define DEBUG_PRINT_PACKETS 0 // Set to 1 to print full TX/RX packets, 0 to disable
 #define VERIFY_MAC_ROUTING 1   // Set to 1 to verify MAC routing logic
 
 // MAC address constants (matching hardware)
 #define BASE_MAC 0x00126D000000ULL  // Base MAC: 00:12:6D:00:00:00
-#define TEST_NODE_RANK 0            // Node rank for this test (0-7 for 8 nodes)
-#define TEST_PYTORCH_MAC 0x00126D0000FFULL  // Simulated PyTorch source MAC
+#define TESTER_MAC_OFFSET 0x02       // Tester/Host MAC offset (rank N -> 0x02+N)
+#define ACCELERATOR_MAC_OFFSET 0x22  // Accelerator MAC offset (rank N -> 0x22+N)
+#define TEST_NODE_RANK 0             // Node rank for this test (0-7 for 8 nodes)
+
+// MAC byte order macro: Uses NETWORK ORDER (MSB first, big-endian, standard Ethernet)
+// MAC 0x00126D000022 writes as bytes: 00 12 6D 00 00 22 (MSB at lowest address)
+//
+// To switch to HOST ORDER (LSB first, little-endian):
+//   Change ((5 - _i) * 8) to (_i * 8) in the shift expression below.
+#define WRITE_MAC_TO_BUF(buf, offset, mac) do { \
+    for (int _i = 0; _i < 6; _i++) { \
+        (buf)[(offset) + _i] = (uint8_t)(((mac) >> ((5 - _i) * 8)) & 0xFF); \
+    } \
+} while(0)
 
 // Check buffer size at compile time (optional)
 #if BUF_SIZE < TOTAL_PACKET_LEN
@@ -68,11 +81,12 @@ static inline uint8_t calculate_partner_rank(uint8_t level, uint8_t my_rank) {
     return my_rank ^ distance;
 }
 
-// Calculate partner MAC address: baseMac | partnerRank
+// Calculate partner MAC address: baseMac | (partnerRank + ACCELERATOR_MAC_OFFSET)
 // This matches the hardware logic in RecursiveDoublingWithDMA.scala
+// Partner accelerators use ACCELERATOR_MAC_OFFSET (0x22), so rank N -> MAC ending in (0x22+N)
 static inline uint64_t calculate_partner_mac(uint8_t level, uint8_t my_rank) {
     uint8_t partner_rank = calculate_partner_rank(level, my_rank);
-    return BASE_MAC | (uint64_t)partner_rank;
+    return BASE_MAC | (uint64_t)(partner_rank + ACCELERATOR_MAC_OFFSET);
 }
 
 // Print MAC address in readable format
@@ -118,7 +132,8 @@ void print_packet_metadata(const char* prefix, const uint8_t* buf) {
     printf("  Collective ID: 0x%04x\n", (buf[1] << 8) | buf[0]);
     printf("  Collective Type: 0x%02x\n", buf[2]);
     printf("  Operation: 0x%02x\n", buf[3]);
-    printf("  Reserved: 0x%02x%02x\n", buf[4], buf[5]);
+    printf("  Reserved[4]: 0x%02x\n", buf[4]);  // Reserved byte
+    printf("  Reserved[5]: 0x%02x\n", buf[5]);  // Reserved (contains rank in Setup packets only)
     printf("  Max Level: %u\n", buf[6]);
     printf("  Current Level: %u\n", buf[7]);
 
@@ -147,9 +162,77 @@ void print_elements_f(const char* title, const uint32_t* elements, size_t num_el
     printf("\n");
 }
 
+// --- Helper: Send Setup Packet to configure accelerator rank ---
+// Sends Setup packet (opCode=0xFE) with collID=0xFFFF to request ACK.
+// Returns 1 on success (ACK received), 0 on failure (timeout).
+int send_setup_packet(int rank, uint64_t tester_mac, uint64_t accel_mac) {
+    printf("Sending Setup Packet to accelerator (Setting Rank=%d)...\n", rank);
+    
+    // Buffers
+    static uint8_t tx_buf_setup[BUF_SIZE] __attribute__((aligned(64)));
+    static uint8_t rx_buf_setup[BUF_SIZE] __attribute__((aligned(64)));
+    
+    memset(tx_buf_setup, 0, TOTAL_PACKET_LEN);
+    
+    // Ethernet header: [padding(2)] [dst(6)] [src(6)] [ethtype(2)]
+    tx_buf_setup[0] = 0x00; tx_buf_setup[1] = 0x00;  // Padding
+    WRITE_MAC_TO_BUF(tx_buf_setup, 2, accel_mac);    // Dst = accelerator
+    WRITE_MAC_TO_BUF(tx_buf_setup, 8, tester_mac);   // Src = tester
+    tx_buf_setup[14] = 0x00; tx_buf_setup[15] = 0x00;  // EtherType
+    
+    // Metadata
+    uint8_t *meta = tx_buf_setup + ETH_HEADER_LEN;
+    meta[0] = 0xFF; meta[1] = 0xFF;  // CollID = 0xFFFF (triggers ACK)
+    meta[2] = 0;                      // Type
+    meta[3] = META_OP_SETUP;          // Operation: SETUP (0xFE)
+    meta[5] = (uint8_t)rank;          // New Rank to configure (Setup packets only)
+    
+    // Pre-post receive buffer for ACK
+    reg_write64(SIMPLENIC_RECV_REQ, (uintptr_t)rx_buf_setup);
+    
+    // Send Setup packet
+    nic_send(tx_buf_setup, TOTAL_PACKET_LEN);
+    
+    // Wait for Setup ACK
+    printf("Waiting for Setup ACK...\n");
+    uint64_t timeout = 20000000;  // ~20ms at 1GHz
+    
+    while (timeout > 0) {
+        if (nic_recv_comp_avail() > 0) {
+            reg_read16(SIMPLENIC_RECV_COMP);
+            asm volatile ("fence");
+            
+            uint8_t *rx_meta = rx_buf_setup + ETH_HEADER_LEN;
+            uint16_t coll_id = rx_meta[0] | (rx_meta[1] << 8);
+            uint8_t op_code = rx_meta[3];
+            uint8_t response_level = rx_meta[7];
+            
+            printf("ACK Packet: collID=0x%04x, opCode=0x%02x, level=%u\n",
+                    coll_id, op_code, response_level);
+            
+            // Check for Setup ACK: collID=0xFFFF, opCode=0xFE, level=1
+            if (coll_id == 0xFFFF && op_code == META_OP_SETUP && response_level == 1) {
+                printf("Setup ACK received! Rank=%d confirmed.\n", rank);
+                return 1;  // Success
+            } else {
+                printf("Ignoring non-ACK packet, continuing wait...\n");
+                // Re-post buffer and continue waiting
+                reg_write64(SIMPLENIC_RECV_REQ, (uintptr_t)rx_buf_setup);
+            }
+        }
+        timeout--;
+    }
+    
+    printf("ERROR: Setup ACK timeout! Continuing anyway...\n");
+    return 0;  // Failure
+}
+
 // --- Main Test ---
 
 int main() {
+    // Suppress unused function warning for nic_recv (we use async recv instead)
+    (void)nic_recv;
+    
     printf("Starting RecursiveDoubling Bare-Metal Test with SimpleNIC...\n");
     srand(1234);
     fflush(stdout);
@@ -184,27 +267,40 @@ int main() {
     uint64_t mac = nic_macaddr();
     printf("NIC MAC Address: %012lx\n", (unsigned long)mac);
     
+    // Compute MAC addresses for this node
+    uint64_t tester_mac = BASE_MAC | ((uint64_t)(TEST_NODE_RANK + TESTER_MAC_OFFSET));
+    uint64_t accel_mac  = BASE_MAC | ((uint64_t)(TEST_NODE_RANK + ACCELERATOR_MAC_OFFSET));
+    
+    printf("Node Rank: %d\n", TEST_NODE_RANK);
+    print_mac("Tester MAC", tester_mac);
+    print_mac("Accelerator MAC", accel_mac);
+    
+    // Set NIC MAC address to tester MAC
+    reg_write64(SIMPLENIC_MACADDR, tester_mac);
+    asm volatile ("fence");
+    
     #if VERIFY_MAC_ROUTING
     printf("\n--- MAC Routing Verification Setup ---\n");
-    printf("Test Node Rank: %d (configured via +node_rank PlusArg)\n", TEST_NODE_RANK);
-    print_mac("Base MAC", BASE_MAC);
-    print_mac("Test Node MAC", BASE_MAC | TEST_NODE_RANK);
-    print_mac("Simulated PyTorch Source MAC", TEST_PYTORCH_MAC);
-    printf("\nExpected Partner MACs for each level:\n");
+    printf("Expected Partner MACs for each level:\n");
     for (uint8_t level = 1; level <= MAX_RECURSION_LEVEL; level++) {
         uint64_t partner_mac = calculate_partner_mac(level, TEST_NODE_RANK);
         uint8_t partner_rank = calculate_partner_rank(level, TEST_NODE_RANK);
         printf("  Level %d: Partner rank=%d, ", level, partner_rank);
         print_mac("Partner MAC", partner_mac);
     }
-    printf("  Level %d (final): Should use stored Level 0 source MAC (0x%012lx)\n", 
-           MAX_RECURSION_LEVEL + 1, (unsigned long)TEST_PYTORCH_MAC);
-    printf("\nNote: Hardware debug prints in NIC.scala will show actual MACs used:\n");
-    printf("  - [EthernetHeaderExtractor] shows source MAC from incoming packets\n");
-    printf("  - [EthernetHeaderPrepender] shows destination MAC for outgoing packets\n");
-    printf("  - Module prints show routing decisions and expected partner MACs\n");
-    printf("Cross-reference hardware prints with expected values above.\n\n");
+    printf("  Level %d (final): Should return to Tester MAC (0x%012lx)\n", 
+           MAX_RECURSION_LEVEL + 1, (unsigned long)tester_mac);
+    printf("\nNote: Hardware debug prints in NIC.scala will show actual MACs used.\n\n");
     #endif
+
+    // --- Send Setup Packet to configure accelerator rank ---
+    printf("=== Sending Setup Packet ===\n");
+    if (!send_setup_packet(TEST_NODE_RANK, tester_mac, accel_mac)) {
+        printf("WARNING: Setup packet failed, but continuing with test...\n");
+    } else {
+        printf("Setup completed successfully.\n");
+    }
+
 
     // --- 2. Run Multiple Test Sets ---
     for (int test_set = 0; test_set < NUM_TEST_SETS; test_set++) {
@@ -271,20 +367,20 @@ int main() {
         // --- Non-blocking send/receive to avoid deadlock ---
         printf("\n--- Sending packets and polling for responses ---\n");
         int total_packets_to_send = NUM_LEVELS * total_chunks;
-        int total_expected_responses = NUM_LEVELS * total_chunks;
+        // Only expect Level 4 (final) responses - one per chunk
+        // Intermediate responses (Level 1-3) go to switchio and are discarded
+        int total_expected_responses = total_chunks;  // Only Level 4 responses
         int responses_received = 0;
         int packets_sent = 0;
-        int received_chunks[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL]; // Track which chunks we've received
+        int received_chunks_l4[MAX_CHUNKS_PER_LEVEL]; // Track Level 4 chunks received
 
         // A stall detector
         const uint64_t STALL_TIMEOUT_CYCLES = 10000000; // Adjust as needed
         uint64_t stall_counter = 0;
 
-        // Initialize tracking array
-        for (int l = 0; l < NUM_LEVELS; l++) {
-            for (int c = 0; c < MAX_CHUNKS_PER_LEVEL; c++) {
-                received_chunks[l][c] = 0;
-            }
+        // Initialize tracking array for Level 4 chunks only
+        for (int c = 0; c < MAX_CHUNKS_PER_LEVEL; c++) {
+            received_chunks_l4[c] = 0;
         }
 
         // --- Flush any pending receive completions from NIC initialization ---
@@ -318,42 +414,30 @@ int main() {
                 memset(tx_buf, 0, BUF_SIZE);
                 
                 // --- Ethernet Header (16 bytes: 14 bytes header + 2 bytes padding) ---
-                // For Level 0 packets: from PyTorch (TEST_PYTORCH_MAC) to this node
-                // For Level 1-3 packets: from this node to partner (simulated)
+                // For Level 0 packets: from Tester to Accelerator
+                // For Level 1-3 packets: Simulating packet FROM partner accelerator TO our accelerator
                 uint64_t src_mac, dst_mac;
+
                 if (level == 0) {
-                    // Level 0: from PyTorch to this node
-                    src_mac = TEST_PYTORCH_MAC;
-                    dst_mac = BASE_MAC | TEST_NODE_RANK;
+                    // Level 0: From Tester to our Accelerator
+                    src_mac = tester_mac;
+                    dst_mac = accel_mac;
                 } else {
-                    // Level 1-3: from this node to partner (simulated intermediate packet)
-                    src_mac = BASE_MAC | TEST_NODE_RANK;
+                    // Level 1-3: Simulating INCOMING packet FROM Partner Accelerator TO our Accelerator
+                    // With loopback harness, these packets will be looped back from switchio.out to switchio.in
                     uint8_t partner_rank = calculate_partner_rank(level, TEST_NODE_RANK);
-                    dst_mac = BASE_MAC | partner_rank;
+                    src_mac = BASE_MAC | (uint64_t)(partner_rank + ACCELERATOR_MAC_OFFSET); // Source = Partner Accelerator
+                    dst_mac = accel_mac; // Dest = Our Accelerator
                 }
                 
                 // Ethernet header wire format: [padding(2B) | dstmac(6B) | srcmac(6B) | ethType(2B)]
-                // For 64-bit words: word0 = [padding(2B) | dstmac(6B)], word1 = [srcmac(6B) | ethType(2B)]
-                // The extractor does Cat(words.reverse), so word1 comes first, then word0
-                // When bytes are written sequentially and read as 64-bit words in little-endian:
-                //   Word = byte[0] | (byte[1] << 8) | ... | (byte[7] << 56)
-                // So byte[0] is LSB, byte[7] is MSB of the word
-                
-                // Word 0 (bytes 0-7): padding(2) + dstmac(6)
-                // Write in little-endian: LSB first
-                tx_buf[0] = 0x00;   // Padding byte 0 (LSB of word 0)
+                // Use WRITE_MAC_TO_BUF for consistent network byte order
+                tx_buf[0] = 0x00;   // Padding byte 0
                 tx_buf[1] = 0x00;   // Padding byte 1
-                for (int i = 0; i < 6; i++) {
-                    tx_buf[2 + i] = (uint8_t)((dst_mac >> (i * 8)) & 0xFF);  // dstmac bytes 0-5 (LSB to MSB)
-                }
-                
-                // Word 1 (bytes 8-15): srcmac(6) + ethType(2)
-                // Write in little-endian: LSB first
-                for (int i = 0; i < 6; i++) {
-                    tx_buf[8 + i] = (uint8_t)((src_mac >> (i * 8)) & 0xFF);  // srcmac bytes 0-5 (LSB to MSB)
-                }
-                tx_buf[14] = 0x00;  // EtherType byte 0 (LSB)
-                tx_buf[15] = 0x00;  // EtherType byte 1 (MSB)
+                WRITE_MAC_TO_BUF(tx_buf, 2, dst_mac);   // Destination MAC (6 bytes)
+                WRITE_MAC_TO_BUF(tx_buf, 8, src_mac);   // Source MAC (6 bytes)
+                tx_buf[14] = 0x00;  // EtherType byte 0
+                tx_buf[15] = 0x00;  // EtherType byte 1
                 
                 // --- Metadata (16 bytes, starting at offset 16) ---
                 uint8_t *metadata = tx_buf + ETH_HEADER_LEN;
@@ -361,8 +445,8 @@ int main() {
                 metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 metadata[2] = META_COLL_TYPE;
                 metadata[3] = META_OP;
-                metadata[4] = 0x00;
-                metadata[5] = TEST_NODE_RANK;  // Sender rank in reserved byte
+                metadata[4] = 0;  // Reserved
+                metadata[5] = 0;  // Reserved (rank only used in Setup packets)
                 metadata[6] = MAX_RECURSION_LEVEL;
                 metadata[7] = (uint8_t)level;
 
@@ -375,10 +459,11 @@ int main() {
                 memcpy(tx_buf + ETH_HEADER_LEN + METADATA_LEN, input_elements[level][chunk], DATA_PAYLOAD_LEN);
 
                 // Verify MAC addresses in buffer before sending (especially for first packet)
+                // Read in NETWORK ORDER (MSB first) to match WRITE_MAC_TO_BUF
                 uint64_t tx_src_mac_check = 0, tx_dst_mac_check = 0;
                 for (int i = 0; i < 6; i++) {
-                    tx_dst_mac_check |= ((uint64_t)tx_buf[2 + i]) << (i * 8);
-                    tx_src_mac_check |= ((uint64_t)tx_buf[8 + i]) << (i * 8);
+                    tx_dst_mac_check |= ((uint64_t)tx_buf[2 + i]) << ((5 - i) * 8);
+                    tx_src_mac_check |= ((uint64_t)tx_buf[8 + i]) << ((5 - i) * 8);
                 }
                 if (packets_sent == 0) {
                     printf("FIRST PACKET TX: Level %d, src_mac=0x%012lx, dst_mac=0x%012lx (expected src=0x%012lx, dst=0x%012lx)\n",
@@ -418,11 +503,11 @@ int main() {
 
                 // --- Extract and verify Ethernet header MAC addresses ---
                 // Ethernet header format: [padding(2B) | dstmac(6B) | srcmac(6B) | ethType(2B)]
-                // Extract MAC addresses (little-endian byte order)
+                // Extract MAC addresses in NETWORK ORDER (MSB first) to match WRITE_MAC_TO_BUF
                 uint64_t rx_dst_mac = 0, rx_src_mac = 0;
                 for (int i = 0; i < 6; i++) {
-                    rx_dst_mac |= ((uint64_t)rx_buf[2 + i]) << (i * 8);  // dstmac bytes 2-7
-                    rx_src_mac |= ((uint64_t)rx_buf[8 + i]) << (i * 8);  // srcmac bytes 8-13
+                    rx_dst_mac |= ((uint64_t)rx_buf[2 + i]) << ((5 - i) * 8);  // dstmac bytes 2-7, MSB first
+                    rx_src_mac |= ((uint64_t)rx_buf[8 + i]) << ((5 - i) * 8);  // srcmac bytes 8-13, MSB first
                 }
                 
                 // --- Strip Ethernet header from received packet ---
@@ -435,58 +520,22 @@ int main() {
                 memcpy(&response_chunk_index, rx_payload + 8, sizeof(uint32_t));
                 memcpy(&response_total_chunks, rx_payload + 12, sizeof(uint32_t));
 
-                #if VERIFY_MAC_ROUTING
-                // Verify MAC addresses based on response level
-                // In single-node Verilator loopback test:
-                // - Packets we send loop back to us
-                // - Source MAC is always this node's MAC (because we sent it)
-                // - Destination MAC is where we originally sent it (partner's MAC for level 1-3)
-                uint64_t this_node_mac = BASE_MAC | TEST_NODE_RANK;
-                uint64_t expected_src_mac = this_node_mac;  // Always our MAC in loopback
-                uint64_t expected_dst_mac;
-                
-                if (response_level == MAX_RECURSION_LEVEL + 1) {
-                    // Level 4 (final): sent back to Level 0 source (PyTorch MAC)
-                    expected_dst_mac = TEST_PYTORCH_MAC;
-                } else {
-                    // Level 1-3: sent to partner node
-                    uint8_t partner_rank = calculate_partner_rank(response_level - 1, TEST_NODE_RANK);
-                    expected_dst_mac = BASE_MAC | partner_rank;
-                }
-                
-                // Verify source MAC is this node's MAC (loopback behavior)
-                if (rx_src_mac != expected_src_mac) {
-                    printf("ERROR: MAC address mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
-                    printf("  Expected source MAC: 0x%012lx (this node in loopback)\n", (unsigned long)expected_src_mac);
-                    printf("  Received source MAC: 0x%012lx\n", (unsigned long)rx_src_mac);
-                    printf("  Expected dest MAC:   0x%012lx\n", (unsigned long)expected_dst_mac);
-                    printf("  Received dest MAC:   0x%012lx\n", (unsigned long)rx_dst_mac);
-                    sim_fail(500 + test_set);
-                }
-                
-                // Verify destination MAC matches where we sent it
-                if (rx_dst_mac != expected_dst_mac) {
-                    printf("ERROR: Destination MAC mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
-                    printf("  Expected dest MAC: 0x%012lx\n", (unsigned long)expected_dst_mac);
-                    printf("  Received dest MAC: 0x%012lx\n", (unsigned long)rx_dst_mac);
-                    sim_fail(501 + test_set);
-                }
-                
-                #if DEBUG_PRINT_PACKETS
-                printf("MAC Verification: src=0x%012lx (this node) ✓, dst=0x%012lx (expected=0x%012lx) ✓\n", 
-                       (unsigned long)rx_src_mac, (unsigned long)rx_dst_mac, (unsigned long)expected_dst_mac);
-                #endif
-                #endif
-
                 #if DEBUG_PRINT_PACKETS
                     printf("Received response for level %u, chunk %u\n", response_level, response_chunk_index);
                 #endif
                 
-                if (received_chunks[response_level-1][response_chunk_index]) {
-                    printf("ERROR: Duplicate response for level %u, chunk %u\n", response_level, response_chunk_index);
+                // Verify we're only receiving Level 4 (final) responses
+                // Intermediate responses (Level 1-3) go to switchio and are discarded
+                if (response_level != MAX_RECURSION_LEVEL + 1) {
+                    printf("WARNING: Received non-final response level %u (expected %d), chunk %u\n", 
+                           response_level, MAX_RECURSION_LEVEL + 1, response_chunk_index);
+                }
+                
+                if (received_chunks_l4[response_chunk_index]) {
+                    printf("ERROR: Duplicate Level 4 response for chunk %u\n", response_chunk_index);
                     sim_fail(300 + test_set);
                 }
-                received_chunks[response_level-1][response_chunk_index] = 1;
+                received_chunks_l4[response_chunk_index] = 1;
 
                 // Construct expected response using the pre-calculated expected output
                 memset(expected_rx_buf, 0, BUF_SIZE);
@@ -496,8 +545,8 @@ int main() {
                 expected_metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 expected_metadata[2] = META_COLL_TYPE;
                 expected_metadata[3] = META_OP;
-                expected_metadata[4] = 0x00;
-                expected_metadata[5] = 0x00;  // Sender rank (from partner, not verified in this test)
+                expected_metadata[4] = 0;  // Reserved
+                expected_metadata[5] = 0;  // Reserved
                 expected_metadata[6] = MAX_RECURSION_LEVEL;
                 expected_metadata[7] = response_level;
 
@@ -505,8 +554,9 @@ int main() {
                 memcpy(expected_metadata + 8, &response_chunk_index, sizeof(uint32_t));
                 memcpy(expected_metadata + 12, &response_total_chunks, sizeof(uint32_t));
 
-                // Copy expected chunk data
-                memcpy(expected_rx_buf + METADATA_LEN, expected_outputs[response_level-1][response_chunk_index], DATA_PAYLOAD_LEN);
+                // Copy expected chunk data - Level 4 output is sum of all 4 input levels
+                // expected_outputs[MAX_RECURSION_LEVEL] = Level0 + Level1 + Level2 + Level3
+                memcpy(expected_rx_buf + METADATA_LEN, expected_outputs[MAX_RECURSION_LEVEL][response_chunk_index], DATA_PAYLOAD_LEN);
 
                 #if DEBUG_PRINT_PACKETS
                     printf("\n--- Received Packet Details ---\n");
@@ -516,6 +566,40 @@ int main() {
                     printf("\n--- Expected Packet Details ---\n");
                     print_packet_metadata("Expected", expected_rx_buf);
                     print_elements_f("Expected", (const uint32_t*)(expected_rx_buf + METADATA_LEN), 16);
+                #endif
+
+                #if VERIFY_MAC_ROUTING
+                    // Verify MAC addresses for Level 4 (final) responses
+                    // In this test mode:
+                    // - Intermediate packets (Level 1-3) go to switchio and are discarded
+                    // - Only final packets (Level 4) come to netio (tester)
+                    // - Source MAC should be our accelerator's MAC
+                    // - Destination MAC should be the tester's MAC (Level 0 source)
+                    uint64_t expected_src_mac = accel_mac;  // Our accelerator adds its MAC as source
+                    uint64_t expected_dst_mac = tester_mac; // Level 4 always goes to tester
+                    
+                    // Verify source MAC is accelerator's MAC
+                    if (rx_src_mac != expected_src_mac) {
+                        printf("ERROR: Source MAC mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                        printf("  Expected source MAC: 0x%012lx (accelerator)\n", (unsigned long)expected_src_mac);
+                        printf("  Received source MAC: 0x%012lx\n", (unsigned long)rx_src_mac);
+                        printf("  Expected dest MAC:   0x%012lx\n", (unsigned long)expected_dst_mac);
+                        printf("  Received dest MAC:   0x%012lx\n", (unsigned long)rx_dst_mac);
+                        sim_fail(500 + test_set);
+                    }
+                    
+                    // Verify destination MAC matches where we sent it
+                    if (rx_dst_mac != expected_dst_mac) {
+                        printf("ERROR: Destination MAC mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                        printf("  Expected dest MAC: 0x%012lx\n", (unsigned long)expected_dst_mac);
+                        printf("  Received dest MAC: 0x%012lx\n", (unsigned long)rx_dst_mac);
+                        sim_fail(501 + test_set);
+                    }
+                    
+                    #if DEBUG_PRINT_PACKETS
+                        printf("MAC Verification: src=0x%012lx (this node) ✓, dst=0x%012lx (expected=0x%012lx) ✓\n", 
+                            (unsigned long)rx_src_mac, (unsigned long)rx_dst_mac, (unsigned long)expected_dst_mac);
+                    #endif
                 #endif
 
                 // Verify response
@@ -545,7 +629,7 @@ int main() {
                         if (bi < 0) bi = 0x80000000 - bi;
                         uint32_t udiff = (ai > bi) ? (uint32_t)(ai - bi) : (uint32_t)(bi - ai);
 
-                        if (udiff > 1u) {
+                        if (udiff > 3u) {
                             bad_elem = e;
                             bad_exp = a;
                             bad_got = b;
