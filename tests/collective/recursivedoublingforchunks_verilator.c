@@ -30,8 +30,8 @@ static inline void sim_fail(uint64_t code) {
 // --- Test Configuration ---
 #define BUF_SIZE 2048         // Should be >= TOTAL_PACKET_LEN
 #define NUM_LEVELS (MAX_RECURSION_LEVEL + 1)  // Testing levels 0, 1, 2, 3 (MAX_RECURSION_LEVEL + 1)
-#define NUM_ELEMENTS 256      // As per module config
-#define BYTES_PER_ELEMENT 4   // As per module config (32-bit elements)
+// NUM_ELEMENTS and BYTES_PER_ELEMENT are defined below based on TEST_FP_FORMAT
+// See FP Format configuration section after META_OP_SETUP
 #define ETH_HEADER_LEN 16      // Ethernet header (14 bytes + 2 bytes padding)
 #define METADATA_LEN 16        // Fixed metadata size
 #define DATA_PAYLOAD_LEN (NUM_ELEMENTS * BYTES_PER_ELEMENT) // 256 * 4 = 1024
@@ -44,8 +44,29 @@ static inline void sim_fail(uint64_t code) {
 // Define metadata values (example)
 #define META_COLL_ID   0xABCD
 #define META_COLL_TYPE 0x01
-#define META_OP        0x05 // e.g., 5 means ADD
+#define META_OP_SUM    0x05 // Sum all values (no averaging)
+#define META_OP_AVG    0x06 // Sum and average at final level
+#define META_OP        META_OP_AVG  // Use AVERAGE operation for this test
 #define META_OP_SETUP  0xFE // Setup Packet to configure Node Rank
+#define NUM_NODES      (1 << MAX_RECURSION_LEVEL)  // 2^maxLevel = 8 nodes for maxLevel=3
+
+// FP Format codes (matches hardware in RecursiveDoublingWithDMA.scala)
+#define FP_FORMAT_FP32     0x00  // 32-bit float: 256 elements/chunk
+#define FP_FORMAT_BFLOAT16 0x01  // 16-bit bfloat: 512 elements/chunk
+#define FP_FORMAT_DLFLOAT  0x02  // 16-bit DLFloat: 512 elements/chunk
+#define TEST_FP_FORMAT     FP_FORMAT_DLFLOAT  // Change to test other formats
+
+// Format-conditional element configuration
+#if TEST_FP_FORMAT == FP_FORMAT_FP32
+    #define NUM_ELEMENTS 256
+    #define BYTES_PER_ELEMENT 4
+#else
+    #define NUM_ELEMENTS 512
+    #define BYTES_PER_ELEMENT 2
+#endif
+
+// Number of packed uint32 words in a chunk (always 256 for 1KB payload)
+#define NUM_PACKED_WORDS 256
 
 #define DEBUG_PRINT_PACKETS 0 // Set to 1 to print full TX/RX packets, 0 to disable
 #define VERIFY_MAC_ROUTING 1   // Set to 1 to verify MAC routing logic
@@ -99,6 +120,179 @@ static void print_mac(const char* label, uint64_t mac) {
            (unsigned long)mac);
 }
 
+// ============================================================================
+// BFloat16 and DLFloat Conversion Functions
+// ============================================================================
+
+// Convert float to BFloat16 (round-nearest-even per IEEE 754)
+// BFloat16: 1 sign, 8 exp (bias=127), 7 mantissa
+// Overflow from rounding produces Infinity (e=255, m=0) per IEEE 754
+static inline uint16_t float_to_bf16(float f) {
+    union { float f; uint32_t u; } conv;
+    conv.f = f;
+    uint32_t bits = conv.u;
+    
+    // Round-nearest-even: check bit 15 (guard) and bits 0-14 (round+sticky)
+    uint32_t guard = (bits >> 15) & 0x1;
+    uint32_t round_sticky = bits & 0x7FFF;
+    uint32_t lsb = (bits >> 16) & 0x1;  // LSB of result
+    
+    // RNE: round up if guard=1 AND (round_sticky!=0 OR lsb=1)
+    uint32_t round_up = guard && (round_sticky || lsb);
+    
+    uint16_t result = (uint16_t)(bits >> 16);
+    if (round_up) {
+        result++;  // May overflow to Inf (0x7F80) which is correct per IEEE 754
+    }
+    return result;
+}
+
+// Convert BFloat16 to float
+static inline float bf16_to_float(uint16_t bf16) {
+    union { float f; uint32_t u; } conv;
+    conv.u = ((uint32_t)bf16) << 16;
+    return conv.f;
+}
+
+// Convert float to DLFloat (round-nearest-up per DLFloat spec)
+// DLFloat: 1 sign, 6 exp (bias=31), 9 mantissa
+// Per DLFloat paper: no subnormals, only e=63 m=511 is NaN-Inf
+static inline uint16_t float_to_dlfloat(float f) {
+    union { float f; uint32_t u; } conv;
+    conv.f = f;
+    uint32_t bits = conv.u;
+    
+    uint32_t sign = (bits >> 31) & 0x1;
+    int32_t exp32 = ((bits >> 23) & 0xFF);  // biased exponent (bias=127)
+    uint32_t mant32 = bits & 0x7FFFFF;      // 23-bit mantissa
+    
+    // Handle FP32 special cases
+    if (exp32 == 0 && mant32 == 0) {
+        // Zero -> DLFloat zero (sign ignored per DLFloat spec)
+        return 0x0000;
+    }
+    if (exp32 == 0) {
+        // FP32 subnormal -> convert to DLFloat normal or zero
+        // These are very small values, typically underflow to zero
+        return 0x0000;
+    }
+    if (exp32 == 255) {
+        // FP32 Inf/NaN -> DLFloat NaN-Inf (e=63, m=511)
+        return 0x7FFF;  // NaN-Inf (sign ignored per spec)
+    }
+    
+    // Convert exponent: FP32 bias=127, DLFloat bias=31
+    int32_t exp_unbiased = exp32 - 127;
+    int32_t exp_dlf = exp_unbiased + 31;
+    
+    if (exp_dlf <= 0) {
+        // Underflow -> zero (no subnormals in DLFloat)
+        return 0x0000;
+    }
+    if (exp_dlf >= 63) {
+        // Overflow -> max normal (e=63, m=510), NOT NaN-Inf
+        return (uint16_t)((sign << 15) | 0x7FFE);  // e=63, m=510
+    }
+    
+    // Round-nearest-up: add 1 if guard bit is set
+    // Guard bit is bit 13 (14th bit from right) of mant32
+    uint32_t guard = (mant32 >> 13) & 0x1;
+    uint32_t mant_dlf = (mant32 >> 14) + guard;
+    
+    // Handle mantissa overflow from rounding
+    if (mant_dlf > 0x1FF) {
+        mant_dlf = 0;
+        exp_dlf++;
+        if (exp_dlf >= 63) {
+            return (uint16_t)((sign << 15) | 0x7FFE);  // Saturate to max normal
+        }
+    }
+    
+    return (uint16_t)((sign << 15) | (exp_dlf << 9) | mant_dlf);
+}
+
+// Convert DLFloat to float
+// Per DLFloat paper: e=0 m≠0 is normal (hidden bit=1), only e=63 m=511 is NaN-Inf
+static inline float dlfloat_to_float(uint16_t dlf) {
+    // DLFloat NaN-Inf (sign ignored per spec)
+    if (dlf == 0x7FFF || dlf == 0xFFFF) {
+        union { float f; uint32_t u; } conv;
+        conv.u = 0x7F800000;  // +Inf
+        return conv.f;
+    }
+    
+    // DLFloat zero (sign ignored per spec)
+    if (dlf == 0x0000 || dlf == 0x8000) {
+        return 0.0f;
+    }
+    
+    uint32_t sign = (dlf >> 15) & 0x1;
+    uint32_t exp_dlf = (dlf >> 9) & 0x3F;   // 6-bit exponent
+    uint32_t mant_dlf = dlf & 0x1FF;        // 9-bit mantissa
+    
+    // DLFloat: e=0 with m≠0 is a normal number (hidden bit = 1)
+    // Value = (-1)^s * 2^(e-31) * 1.m  where e can be 0
+    // For e=0: exponent is 0-31 = -31
+    int32_t exp_unbiased = exp_dlf - 31;
+    int32_t exp32 = exp_unbiased + 127;
+    
+    if (exp32 <= 0) {
+        // Underflow to FP32 subnormal or zero - treat as zero for simplicity
+        return sign ? -0.0f : 0.0f;
+    }
+    if (exp32 >= 255) {
+        // Overflow to FP32 Inf
+        union { float f; uint32_t u; } conv;
+        conv.u = (sign << 31) | 0x7F800000;
+        return conv.f;
+    }
+    
+    // Extend mantissa from 9 bits to 23 bits
+    uint32_t mant32 = mant_dlf << 14;
+    
+    union { float f; uint32_t u; } conv;
+    conv.u = (sign << 31) | (exp32 << 23) | mant32;
+    return conv.f;
+}
+
+// ============================================================================
+// Format-Aware Conversion Wrappers (selected by TEST_FP_FORMAT)
+// ============================================================================
+
+// Convert float to the 16-bit format and back, capturing precision loss
+// Returns the float value after round-trip through the 16-bit format
+static inline float float_roundtrip_16bit(float f) {
+#if TEST_FP_FORMAT == FP_FORMAT_BFLOAT16
+    return bf16_to_float(float_to_bf16(f));
+#elif TEST_FP_FORMAT == FP_FORMAT_DLFLOAT
+    return dlfloat_to_float(float_to_dlfloat(f));
+#else
+    return f;  // FP32: no precision loss
+#endif
+}
+
+// Convert float to raw 16-bit representation (for buffer packing)
+static inline uint16_t float_to_raw16(float f) {
+#if TEST_FP_FORMAT == FP_FORMAT_BFLOAT16
+    return float_to_bf16(f);
+#elif TEST_FP_FORMAT == FP_FORMAT_DLFLOAT
+    return float_to_dlfloat(f);
+#else
+    return 0;  // Should not be called for FP32
+#endif
+}
+
+// Convert raw 16-bit representation to float (for verification)
+static inline float raw16_to_float(uint16_t raw) {
+#if TEST_FP_FORMAT == FP_FORMAT_BFLOAT16
+    return bf16_to_float(raw);
+#elif TEST_FP_FORMAT == FP_FORMAT_DLFLOAT
+    return dlfloat_to_float(raw);
+#else
+    return 0.0f;  // Should not be called for FP32
+#endif
+}
+
 // Generate the nth permutation of numbers 0 to n-1 (0-indexed)
 void generate_nth_permutation(int* perm, int n, int nth) {
     // Initialize with sequential numbers
@@ -132,7 +326,7 @@ void print_packet_metadata(const char* prefix, const uint8_t* buf) {
     printf("  Collective ID: 0x%04x\n", (buf[1] << 8) | buf[0]);
     printf("  Collective Type: 0x%02x\n", buf[2]);
     printf("  Operation: 0x%02x\n", buf[3]);
-    printf("  Reserved[4]: 0x%02x\n", buf[4]);  // Reserved byte
+    printf("  TEST_FP_FORMAT: 0x%02x\n", buf[4]);  // TEST_FP_FORMAT
     printf("  Reserved[5]: 0x%02x\n", buf[5]);  // Reserved (contains rank in Setup packets only)
     printf("  Max Level: %u\n", buf[6]);
     printf("  Current Level: %u\n", buf[7]);
@@ -150,7 +344,8 @@ void print_elements_f(const char* title, const uint32_t* elements, size_t num_el
     // Cast size_t to unsigned long and use %lu
     printf("%s (%lu elements, %lu bytes total):\n", title, (unsigned long)num_elements, (unsigned long)(num_elements * sizeof(uint32_t)));
     
-    // The rest of your function is fine
+#if TEST_FP_FORMAT == FP_FORMAT_FP32
+    // FP32: each uint32 is one float
     for (size_t i = 0; i < num_elements; ++i) {
         float val;
         memcpy(&val, &elements[i], sizeof(float));
@@ -159,6 +354,22 @@ void print_elements_f(const char* title, const uint32_t* elements, size_t num_el
             printf("\n");
         }
     }
+#else
+    // 16-bit formats: each uint32 contains 2 packed 16-bit values
+    // Unpack and convert using raw16_to_float
+    size_t element_count = 0;
+    for (size_t i = 0; i < num_elements; ++i) {
+        uint16_t low = (uint16_t)(elements[i] & 0xFFFF);
+        uint16_t high = (uint16_t)((elements[i] >> 16) & 0xFFFF);
+        printf("%12.4f ", raw16_to_float(low));
+        element_count++;
+        if (element_count % 8 == 0) printf("\n");
+        printf("%12.4f ", raw16_to_float(high));
+        element_count++;
+        if (element_count % 8 == 0) printf("\n");
+    }
+    if (element_count % 8 != 0) printf("\n");
+#endif
     printf("\n");
 }
 
@@ -240,6 +451,8 @@ int main() {
     printf("Each set: %d levels, %d elements (%d bytes payload per chunk)\n",
            NUM_LEVELS, NUM_ELEMENTS, DATA_PAYLOAD_LEN);
     printf("Max Recursion Level: %d\n", MAX_RECURSION_LEVEL);
+    printf("Operation Mode: %s (0x%02X), Nodes: %d\n", 
+           (META_OP == META_OP_AVG) ? "AVERAGE" : "SUM", META_OP, NUM_NODES);
     #if DEBUG_PRINT_PACKETS
         printf(">>> Full packet debug printing is ENABLED <<<\n");
     #else
@@ -254,12 +467,13 @@ int main() {
     static uint8_t rx_buf[BUF_SIZE] __attribute__((aligned(64)));
     static uint8_t expected_rx_buf[BUF_SIZE] __attribute__((aligned(64)));
 
-    // Buffers to hold the chunked input data payloads (as 32-bit elements)
-    // Use float for easier calculation, then cast to uint32_t for transmission
+    // Buffers to hold the chunked input data payloads
+    // Float arrays: NUM_ELEMENTS floats for calculation
+    // Uint32 arrays: NUM_PACKED_WORDS (256) for transmission (packed 16-bit or direct 32-bit)
     static float input_elements_f[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_ELEMENTS] __attribute__((aligned(64)));
     static float expected_outputs_f[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_ELEMENTS] __attribute__((aligned(64)));
-    static uint32_t input_elements[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_ELEMENTS] __attribute__((aligned(64)));
-    static uint32_t expected_outputs[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_ELEMENTS] __attribute__((aligned(64)));
+    static uint32_t input_elements[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_PACKED_WORDS] __attribute__((aligned(64)));
+    static uint32_t expected_outputs[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_PACKED_WORDS] __attribute__((aligned(64)));
     static int packet_order[NUM_LEVELS * MAX_CHUNKS_PER_LEVEL];  // Order for all chunk packets
 
     // --- 1. NIC Initialization (Implicit) ---
@@ -337,22 +551,56 @@ int main() {
             for (int chunk = 0; chunk < total_chunks; ++chunk) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i) {
                     // Generate a random float between 0.0 and max_rand_val with varied decimals
-                    input_elements_f[p][chunk][i] = ((float)rand() / (float)RAND_MAX) * max_rand_val;
-                    // Copy the bit pattern into the uint32_t array for memcpy
-                    memcpy(&input_elements[p][chunk][i], &input_elements_f[p][chunk][i], sizeof(uint32_t));
+                    float raw_val = ((float)rand() / (float)RAND_MAX) * max_rand_val;
+                    // Apply precision loss for 16-bit formats (round-trip through format)
+                    input_elements_f[p][chunk][i] = float_roundtrip_16bit(raw_val);
                 }
+                
+                // Pack input values into uint32 buffer based on format
+#if TEST_FP_FORMAT == FP_FORMAT_FP32
+                // FP32: direct copy of bit patterns
+                memcpy(input_elements[p][chunk], input_elements_f[p][chunk], DATA_PAYLOAD_LEN);
+#else
+                // 16-bit formats: pack 2 elements per uint32
+                for (int i = 0; i < NUM_ELEMENTS; i += 2) {
+                    uint16_t val0 = float_to_raw16(input_elements_f[p][chunk][i]);
+                    uint16_t val1 = float_to_raw16(input_elements_f[p][chunk][i + 1]);
+                    // Pack low element in low 16 bits, high element in high 16 bits
+                    input_elements[p][chunk][i / 2] = ((uint32_t)val1 << 16) | (uint32_t)val0;
+                }
+#endif
             }
         }
 
-        // Pre-calculate and store all expected outputs for each level and chunk using floating-point math
+        // Pre-calculate expected outputs for each level and chunk using floating-point math
+        // For 16-bit formats: model hardware behavior by round-tripping through 16-bit at each level
         for (int chunk = 0; chunk < total_chunks; ++chunk) {
-            // Level 0: output equals input
-            memcpy(expected_outputs_f[0][chunk], input_elements_f[0][chunk], DATA_PAYLOAD_LEN);
+            // Level 0: output equals input (already round-tripped when input was generated)
+            memcpy(expected_outputs_f[0][chunk], input_elements_f[0][chunk], NUM_ELEMENTS * sizeof(float));
             
             // Higher levels: output = input + previous_level_output
+            // For 16-bit formats, round-trip through format at each level to match hardware precision
             for (int level = 1; level <= MAX_RECURSION_LEVEL; level++) {
                 for (int i = 0; i < NUM_ELEMENTS; i++) {
-                    expected_outputs_f[level][chunk][i] = input_elements_f[level][chunk][i] + expected_outputs_f[level-1][chunk][i];
+                    float sum = input_elements_f[level][chunk][i] + expected_outputs_f[level-1][chunk][i];
+#if TEST_FP_FORMAT != FP_FORMAT_FP32
+                    // Round-trip through 16-bit format to match hardware precision loss
+                    // Hardware: read 16-bit from memory -> add 16-bit -> store 16-bit result
+                    sum = float_roundtrip_16bit(sum);
+#endif
+                    expected_outputs_f[level][chunk][i] = sum;
+                }
+            }
+            
+            // For AVERAGE operation, divide final level output by number of nodes
+            // This matches the hardware behavior when operationReg == OP_AVERAGE
+            if (META_OP == META_OP_AVG) {
+                for (int i = 0; i < NUM_ELEMENTS; i++) {
+                    expected_outputs_f[MAX_RECURSION_LEVEL][chunk][i] /= (float)NUM_NODES;
+#if TEST_FP_FORMAT != FP_FORMAT_FP32
+                    // Round-trip after division to match hardware divideByPow2
+                    expected_outputs_f[MAX_RECURSION_LEVEL][chunk][i] = float_roundtrip_16bit(expected_outputs_f[MAX_RECURSION_LEVEL][chunk][i]);
+#endif
                 }
             }
         }
@@ -360,7 +608,17 @@ int main() {
         // After calculating all expected float values, copy their bit patterns to the uint32_t array for verification
         for (int p = 0; p < NUM_LEVELS; p++) {
             for (int chunk = 0; chunk < total_chunks; ++chunk) {
+#if TEST_FP_FORMAT == FP_FORMAT_FP32
+                // FP32: direct copy of bit patterns
                 memcpy(expected_outputs[p][chunk], expected_outputs_f[p][chunk], DATA_PAYLOAD_LEN);
+#else
+                // 16-bit formats: pack 2 elements per uint32
+                for (int i = 0; i < NUM_ELEMENTS; i += 2) {
+                    uint16_t val0 = float_to_raw16(expected_outputs_f[p][chunk][i]);
+                    uint16_t val1 = float_to_raw16(expected_outputs_f[p][chunk][i + 1]);
+                    expected_outputs[p][chunk][i / 2] = ((uint32_t)val1 << 16) | (uint32_t)val0;
+                }
+#endif
             }
         }
 
@@ -445,7 +703,7 @@ int main() {
                 metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 metadata[2] = META_COLL_TYPE;
                 metadata[3] = META_OP;
-                metadata[4] = 0;  // Reserved
+                metadata[4] = TEST_FP_FORMAT;  // FP format
                 metadata[5] = 0;  // Reserved (rank only used in Setup packets)
                 metadata[6] = MAX_RECURSION_LEVEL;
                 metadata[7] = (uint8_t)level;
@@ -545,7 +803,7 @@ int main() {
                 expected_metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
                 expected_metadata[2] = META_COLL_TYPE;
                 expected_metadata[3] = META_OP;
-                expected_metadata[4] = 0;  // Reserved
+                expected_metadata[4] = TEST_FP_FORMAT;  // FP format
                 expected_metadata[5] = 0;  // Reserved
                 expected_metadata[6] = MAX_RECURSION_LEVEL;
                 expected_metadata[7] = response_level;
@@ -610,18 +868,23 @@ int main() {
                     sim_fail(400 + test_set);
                 }
 
-                // 2) Compare payload with 1-ULP tolerance per 32-bit float element
+                // 2) Compare payload with ULP tolerance per 32-bit word
+                // For FP32: 256 words, each is a float
+                // For 16-bit: 256 words, each contains 2 packed 16-bit elements
                 {
                     const uint32_t* exp_words = (const uint32_t*)(expected_rx_buf + METADATA_LEN);
                     const uint32_t* got_words = (const uint32_t*)(rx_payload + METADATA_LEN);
-                    int bad_elem = -1;
+                    int num_words = DATA_PAYLOAD_LEN / 4;  // Always 256 for 1KB payload
+                    int bad_word = -1;
                     uint32_t bad_exp = 0, bad_got = 0, bad_diff = 0;
 
-                    for (int e = 0; e < NUM_ELEMENTS; ++e) {
-                        uint32_t a = exp_words[e];
-                        uint32_t b = got_words[e];
+                    for (int w = 0; w < num_words; ++w) {
+                        uint32_t a = exp_words[w];
+                        uint32_t b = got_words[w];
                         if (a == b) continue;
 
+#if TEST_FP_FORMAT == FP_FORMAT_FP32
+                        // FP32: ULP comparison for single float
                         int32_t ai, bi;
                         memcpy(&ai, &a, sizeof(int32_t));
                         memcpy(&bi, &b, sizeof(int32_t));
@@ -630,18 +893,48 @@ int main() {
                         uint32_t udiff = (ai > bi) ? (uint32_t)(ai - bi) : (uint32_t)(bi - ai);
 
                         if (udiff > 3u) {
-                            bad_elem = e;
+                            bad_word = w;
                             bad_exp = a;
                             bad_got = b;
                             bad_diff = udiff;
                             break;
                         }
+#else
+                        // 16-bit formats: Compare each 16-bit element in the word
+                        uint16_t a_lo = a & 0xFFFF, a_hi = (a >> 16) & 0xFFFF;
+                        uint16_t b_lo = b & 0xFFFF, b_hi = (b >> 16) & 0xFFFF;
+                        
+                        // Compare low element
+                        if (a_lo != b_lo) {
+                            int16_t ai = (int16_t)a_lo, bi = (int16_t)b_lo;
+                            uint16_t udiff = (ai > bi) ? (uint16_t)(ai - bi) : (uint16_t)(bi - ai);
+                            if (udiff > 2u) {
+                                bad_word = w;
+                                bad_exp = a;
+                                bad_got = b;
+                                bad_diff = udiff;
+                                break;
+                            }
+                        }
+                        // Compare high element
+                        if (a_hi != b_hi) {
+                            int16_t ai = (int16_t)a_hi, bi = (int16_t)b_hi;
+                            uint16_t udiff = (ai > bi) ? (uint16_t)(ai - bi) : (uint16_t)(bi - ai);
+                            if (udiff > 2u) {
+                                bad_word = w;
+                                bad_exp = a;
+                                bad_got = b;
+                                bad_diff = udiff;
+                                break;
+                            }
+                        }
+#endif
                     }
 
-                    if (bad_elem >= 0) {
-                        printf("ERROR: Float payload mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
-                        printf("  First differing element %d: Expected 0x%08x Got 0x%08x (ULP diff %u)\n",
-                               bad_elem, bad_exp, bad_got, bad_diff);
+                    if (bad_word >= 0) {
+                        printf("ERROR: Payload mismatch for level %u, chunk %u!\n", response_level, response_chunk_index);
+                        printf("  First differing word %d: Expected 0x%08x Got 0x%08x (diff %u)\n",
+                               bad_word, bad_exp, bad_got, bad_diff);
                         sim_fail(400 + test_set);
                     }
                 }
