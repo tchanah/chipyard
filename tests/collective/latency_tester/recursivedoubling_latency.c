@@ -5,8 +5,8 @@
 #include <time.h>
 
 // --- MMIO and NIC Driver Headers ---
-#include "../mmio.h" // Assumed to be in ../ relative to the C file
-#include "../nic.h"  // Assumed to be in ../ relative to the C file
+#include "../../mmio.h" // Assumed to be in ../ relative to the C file
+#include "../../nic.h"  // Assumed to be in ../ relative to the C file
 
 // --- Simulation Control via 'tohost' ---
 extern volatile uint64_t tohost;
@@ -18,6 +18,9 @@ static inline void sim_pass() {
     tohost = 1; // Standard encoding for success
     while (1);
 }
+
+// Add rdcycle() for latency measurement
+#include <riscv-pk/encoding.h>
 
 static inline void sim_fail(uint64_t code) {
     printf("ERROR: Test FAILED with code %lu. Signaling simulation failure.\n", (unsigned long)code);
@@ -39,7 +42,7 @@ static inline void sim_fail(uint64_t code) {
 #define FP_FORMAT_FP32     0x00  // 32-bit float: 256 elements/chunk
 #define FP_FORMAT_BFLOAT16 0x01  // 16-bit bfloat: 512 elements/chunk
 #define FP_FORMAT_DLFLOAT  0x02  // 16-bit DLFloat: 512 elements/chunk
-#define TEST_FP_FORMAT     FP_FORMAT_DLFLOAT  // Change to test other formats
+#define TEST_FP_FORMAT     FP_FORMAT_BFLOAT16  // Change to test other formats
 
 // Format-conditional element configuration
 #if TEST_FP_FORMAT == FP_FORMAT_FP32
@@ -56,8 +59,8 @@ static inline void sim_fail(uint64_t code) {
 #define LEVEL0_MAX_VAL 1000.0f
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
-#define NUM_TEST_SETS  8       // Single test set for 8-node multi-node test
-#define TOTAL_CHUNKS 1024        // Number of chunks to test (adjustable)
+#define NUM_TEST_SETS  10240       // Multiple sets for latency
+#define TOTAL_CHUNKS 1          // Only 1 chunk for single-packet latency
 #define MAX_CHUNKS_PER_LEVEL 1024  // Maximum supported chunks per level
 #define MAX_CHUNK_SPREAD 32        // Max shuffle distance for packet ordering (0 = sequential)
 #define NUM_NODES 8             // Number of nodes in the 8-node test
@@ -258,7 +261,7 @@ static void fill_node_chunk_data(uint32_t node,
         float raw_val = uniform_float(&rng_state, LEVEL0_MAX_VAL);
         dst_f[i] = float_roundtrip_16bit(raw_val);
     }
-    
+
 #if TEST_FP_FORMAT == FP_FORMAT_FP32
     memcpy(dst_u32, dst_f, DATA_PAYLOAD_LEN);
 #else
@@ -534,25 +537,25 @@ int main(int argc, char *argv[]) {
 
     // --- 2. Run Test Set (8-Node Multi-Node Test) ---
     for (int test_set = 0; test_set < NUM_TEST_SETS; test_set++) {
-        printf("\n=== Starting 8-Node Test Set %d ===\n", test_set + 1);
+        // printf("\n=== Starting 8-Node Test Set %d ===\n", test_set + 1);
 
         // Generate unique collective ID for this test set
         uint16_t test_collective_id = (uint16_t)(0x1000 + test_set);
-        printf("Collective ID for this set: 0x%04X\n", test_collective_id);
+        // printf("Collective ID for this set: 0x%04X\n", test_collective_id);
 
         // For 8-node test: can test with multiple chunks, but only send Level 0
         // Start with a reasonable number of chunks for initial testing
         uint32_t total_chunks = TOTAL_CHUNKS;  // Controlled by global define
-        printf("Testing with %u chunk(s) per level\n", total_chunks);
-        printf("8-Node Test Mode: Each node sends Level 0 packets only (all chunks), receives Level 4\n");
+        // printf("Testing with %u chunk(s) per level\n", total_chunks);
+        // printf("8-Node Test Mode: Each node sends Level 0 packets only (all chunks), receives Level 4\n");
         
         // Generate packet order with controlled randomness (spread-limited shuffling)
         int level0_packet_order[MAX_CHUNKS_PER_LEVEL];
         uint32_t schedule_seed = 0xBADC0DEu ^ (uint32_t)test_set ^ ((uint32_t)NODE_RANK << 16);
         generate_spread_limited_order(level0_packet_order, total_chunks, schedule_seed);
         
-        printf("Generated packet order for %u chunks (spread=%d)\n", 
-               total_chunks, MAX_CHUNK_SPREAD);
+        // printf("Generated packet order for %u chunks (spread=%d)\n", 
+        //        total_chunks, MAX_CHUNK_SPREAD);
         
         // Prepare deterministic Level 0 input data for this node
         for (int chunk = 0; chunk < total_chunks; ++chunk) {
@@ -608,10 +611,10 @@ int main(int argc, char *argv[]) {
 #endif
         }
         
-        printf("Expected Level 4 result: sum of all %d nodes' Level 0 data (each node has different data)\n", NUM_NODES);
+        // printf("Expected Level 4 result: sum of all %d nodes' Level 0 data (each node has different data)\n", NUM_NODES);
 
         // --- 8-Node Test: Send Level 0, Receive Level 4 ---
-        printf("\n--- Sending Level 0 packets and waiting for Level 4 responses ---\n");
+        // printf("\n--- Sending Level 0 packets and waiting for Level 4 responses ---\n");
         // Only send Level 0 packets (one per chunk)
         int total_packets_to_send = total_chunks;  // Only Level 0
         // Only expect Level 4 responses (one per chunk)
@@ -620,9 +623,14 @@ int main(int argc, char *argv[]) {
         int packets_sent = 0;
         int received_chunks_level4[MAX_CHUNKS_PER_LEVEL]; // Track which Level 4 chunks we've received
 
-        // A stall detector
-        const uint64_t STALL_TIMEOUT_CYCLES = 100000000; // Longer timeout for multi-node
-        uint64_t stall_counter = 0;
+        // Cycle timing variables
+        uint64_t cycle_start = 0, cycle_end = 0;
+
+        // A stall detector using rdcycle() for cycle-accurate timeout
+        // Node 0 adds 1M-cycle wait per test set, so we need enough margin.
+        // 5 billion cycles @ 1 GHz = 5 seconds; at 36 MHz FireSim rate ≈ 138 wall-clock seconds.
+        const uint64_t STALL_TIMEOUT_CYCLES = 5000000000ULL;
+        uint64_t last_progress_cycle = rdcycle();
 
         // Initialize tracking array (only for Level 4)
         for (int c = 0; c < MAX_CHUNKS_PER_LEVEL; c++) {
@@ -651,7 +659,30 @@ int main(int argc, char *argv[]) {
                 reg_write64(SIMPLENIC_RECV_REQ, (uintptr_t)rx_buffers[i]);
             }
         } else {
-            printf("Reusing %d already-posted receive buffers.\n", NUM_RX_BUFFERS);
+            // printf("Reusing %d already-posted receive buffers.\n", NUM_RX_BUFFERS);
+        }
+
+        // --- Synchronized Start for Single-Chunk Latency ---
+        // On test_set 0: Nodes 1-7 send immediately to prime; Node 0 waits 1M cycles
+        //   so all 7 other Level 0 packets are already queued in the accelerator before
+        //   Node 0 triggers completion, giving us a clean one-way latency measurement.
+        //
+        // On test_set > 0: ALL nodes send immediately. Natural synchronization from the
+        //   previous Level 4 receive ensures no node can start Set N+1 before receiving
+        //   Set N's Level 4, so everyone is already aligned when they enter this code.
+        if (TEST_NODE_RANK != 0) {
+            printf("Node %u will send packet immediately.\n", TEST_NODE_RANK);
+        } else if (test_set == 0) {
+            // Only wait on the very first set to prime the pipeline
+            printf("Node 0 waiting for 1,000,000 cycles to allow other nodes to send first...\n");
+            uint64_t wait_start = rdcycle();
+            while (rdcycle() - wait_start < 1000000) {
+                // Spin wait
+            }
+            printf("Node 0 wait complete. Starting latency measurement.\n");
+        } else {
+            // Sets 2+: all nodes (including 0) send immediately — already synchronized
+            // printf("Node 0 sending immediately (Set %d, pipeline already primed).\n", test_set + 1);
         }
 
 
@@ -718,6 +749,11 @@ int main(int argc, char *argv[]) {
                 // --- Data Payload (starting at offset 32, after Ethernet header + metadata) ---
                 memcpy(tx_buf + ETH_HEADER_LEN + METADATA_LEN, input_elements[0][chunk], DATA_PAYLOAD_LEN);
 
+                if (TEST_NODE_RANK == 0) {
+                    // Record start time right before sending
+                    cycle_start = rdcycle();
+                }
+
                 // Send full packet including Ethernet header
                 nic_send(tx_buf, (unsigned long)TOTAL_PACKET_LEN);
 
@@ -730,12 +766,15 @@ int main(int argc, char *argv[]) {
                 #endif
 
                 packets_sent++;
-                stall_counter = 0; // Reset stall counter because we made progress
+                last_progress_cycle = rdcycle(); // TX counts as system progress too
             }
 
             // === 2. POLL FOR LEVEL 4 RESPONSES ===
             // Has the NIC filled our pre-posted buffer?
             if (nic_recv_comp_avail() > 0) {
+                // Capture cycles immediately upon completion availability signal 
+                uint64_t rx_cycles = rdcycle();
+
                 // Consume from ring buffer tail (completions are FIFO - buffers filled in order posted)
                 rx_buf = rx_buffers[rx_tail];
                 rx_tail = (rx_tail + 1) % NUM_RX_BUFFERS;
@@ -747,17 +786,10 @@ int main(int argc, char *argv[]) {
                 // IMMEDIATELY copy packet to local buffer before NIC can overwrite it
                 // This prevents race condition where NIC fills rx_buf with next packet
                 memcpy(rx_local_copy, rx_buf, BUF_SIZE);
-                
-                // Verify that the packet length matches expected payload length
-                if (received_len != TOTAL_PACKET_LEN) {
-                    printf("ERROR: Received packet with unexpected length! Expected %d, Got %d\n",
-                        TOTAL_PACKET_LEN, received_len);
-                    sim_fail(600 + test_set);
-                }
 
                 // Use local copy for all processing (safe from NIC overwrites)
                 uint8_t *rx_payload = rx_local_copy + ETH_HEADER_LEN;
-                
+
                 // --- Extract response level from metadata ---
                 uint8_t response_level = rx_payload[7];
                 uint32_t response_chunk_index, response_total_chunks;
@@ -782,7 +814,7 @@ int main(int argc, char *argv[]) {
                     memset(rx_buf, 0, BUF_SIZE);  // Clear before re-posting
                     while (nic_recv_req_avail() == 0);
                     reg_write64(SIMPLENIC_RECV_REQ, (uintptr_t)rx_buf);
-                    stall_counter = 0;
+                    last_progress_cycle = rdcycle(); // Non-Level-4 still shows pipeline is alive
                     continue;
                 }
 
@@ -797,6 +829,17 @@ int main(int argc, char *argv[]) {
                     sim_fail(300 + test_set);
                 }
                 received_chunks_level4[response_chunk_index] = 1;
+
+                if (TEST_NODE_RANK == 0) {
+                    cycle_end = rx_cycles; // Use the cycle timestamp we grabbed exactly when the response arrived
+                }
+
+                // Verify that the packet length matches expected payload length
+                if (received_len != TOTAL_PACKET_LEN) {
+                    printf("ERROR: Received packet with unexpected length! Expected %d, Got %d\n",
+                           TOTAL_PACKET_LEN, received_len);
+                    sim_fail(600 + test_set);
+                }
 
                 // Construct expected Level 4 response
                 memset(expected_rx_buf, 0, BUF_SIZE);
@@ -923,7 +966,7 @@ int main(int argc, char *argv[]) {
                 #endif
                 
                 responses_received++;
-                stall_counter = 0; // Reset stall counter because we made progress
+                last_progress_cycle = rdcycle(); // Reset stall clock because we made progress
                 
                 // Clear and re-post this buffer (always, to maintain NIC queue)
                 memset(rx_buf, 0, BUF_SIZE);  // Clear before re-posting
@@ -931,10 +974,9 @@ int main(int argc, char *argv[]) {
                 reg_write64(SIMPLENIC_RECV_REQ, (uintptr_t)rx_buf);
             }
 
-            // === 3. CHECK FOR STALL ===
+            // === 3. CHECK FOR STALL (cycle-accurate) ===
             if (packets_sent == total_packets_to_send && responses_received < total_expected_responses) {
-                stall_counter++;
-                if (stall_counter > STALL_TIMEOUT_CYCLES) {
+                if ((rdcycle() - last_progress_cycle) > STALL_TIMEOUT_CYCLES) {
                     printf("ERROR: Stall detected! Sent all packets but timed out waiting for responses.\n");
                     printf("Sent: %d, Received: %d\n", packets_sent, responses_received);
                     sim_fail(500 + test_set);
@@ -942,8 +984,23 @@ int main(int argc, char *argv[]) {
             }
         } // End of main polling loop
 
-        printf("All %d Level 0 packets sent and %d Level 4 responses received.\n", packets_sent, responses_received);
-        printf("=== 8-Node Test Set %d Completed Successfully ===\n", test_set + 1);
+        if (TEST_NODE_RANK == 0) {
+            uint64_t total_cycles = cycle_end - cycle_start;
+            // printf("\n=== CYCLE-ACCURATE PERFORMANCE (NODE 0) ===\n");
+            // printf("Total cycles for 1 packet: %lu\n", (unsigned long)total_cycles);
+            // printf("Total data: 1 chunk × %d bytes = %d bytes\n", DATA_PAYLOAD_LEN, DATA_PAYLOAD_LEN);
+            // printf("At 1 GHz target: %.3f ns latency\n", (double)total_cycles); // 1 cycle = 1 ns at 1GHz
+            // printf("===========================================\n");
+            // printf("All %d Level 0 packets sent and %d Level 4 responses received.\n", packets_sent, responses_received);
+
+            // CSV Format: Set, CollID, Cycles, Latency(ns)
+            printf("LATENCY_LOG (Set, CollID, Cycles, Latency(ns)): %d, 0x%04x, %lu, %.3f\n", 
+                   test_set + 1, 
+                   test_collective_id, 
+                   (unsigned long)total_cycles, 
+                   (double)total_cycles);
+        }
+        // printf("=== 8-Node Test Set %d Completed Successfully ===\n", test_set + 1);
     }
 
     printf("\n--- 8-Node Test Completed Successfully ---\n");
