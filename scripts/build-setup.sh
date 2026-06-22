@@ -216,6 +216,15 @@ if run_step "2"; then
     begin_step "2" "Initializing Chipyard submodules"
     $CYDIR/scripts/init-submodules-no-riscv-tools.sh
     exit_if_last_command_failed
+    
+    # Ensure icenet submodule is on the correct branch
+    if [ -d "$CYDIR/generators/icenet" ]; then
+        echo "Setting icenet submodule to collective-llm-v2026.06 branch"
+        cd "$CYDIR/generators/icenet"
+        git fetch origin
+        git checkout collective-llm-v2026.06 || git checkout -b collective-llm-v2026.06 origin/collective-llm-v2026.06
+        cd "$CYDIR"
+    fi
 fi
 
 # build extra toolchain collateral (i.e. spike, pk, riscv-tests, libgloss)
@@ -314,6 +323,19 @@ if run_step "10"; then
         -x $CYDIR/conda-reqs/circt.json \
         -g null
     exit_if_last_command_failed
+    
+    # Ensure icenet submodule is still on the correct branch after any submodule updates
+    if [ -d "$CYDIR/generators/icenet" ]; then
+        echo "Re-checking icenet submodule branch after CIRCT installation"
+        cd "$CYDIR/generators/icenet"
+        current_branch=$(git branch --show-current 2>/dev/null || echo "detached")
+        if [ "$current_branch" != "collective-llm-v2026.06" ]; then
+            echo "Switching icenet back to collective-llm-v2026.06 branch"
+            git fetch origin
+            git checkout collective-llm-v2026.06 || git checkout -b collective-llm-v2026.06 origin/collective-llm-v2026.06
+        fi
+        cd "$CYDIR"
+    fi
 fi
 
 
