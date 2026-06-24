@@ -35,7 +35,11 @@ include ../../libgloss.mk
 
 CHUNKS ?= 4
 SETS   ?= 2
-DEFS    = -DMAX_CHUNKS_PER_LEVEL=$(CHUNKS) -DNUM_TEST_SETS=$(SETS)
+LAG    ?= 2      # arrival pipeline depth (chunks): 0=chunk-major, >=CHUNKS=level-major
+JITTER ?= 0      # +/- reorder window around each pipeline slot (0 = clean pipeline)
+SEED   ?= 1      # jitter pattern seed (fix it to compare configs; sweep it for variance)
+DEFS    = -DMAX_CHUNKS_PER_LEVEL=$(CHUNKS) -DNUM_TEST_SETS=$(SETS) \
+          -DLLM_LAG=$(LAG) -DLLM_JITTER=$(JITTER) -DLLM_SEED=$(SEED)
 
 SRC = recursivedoubling_llm.c
 BIN = recursivedoubling_llm.riscv

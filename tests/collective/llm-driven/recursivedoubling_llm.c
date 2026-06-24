@@ -55,6 +55,22 @@ static inline void sim_fail(uint64_t code) {
 #define MAX_CHUNKS_PER_LEVEL 4
 #endif
 
+// --- Arrival-order model: pipelined LAG + optional jitter (mimics real partner arrival) ---
+// Packets are sent in ascending key = chunk + level*LLM_LAG + jitter.
+//   LLM_LAG    : pipeline depth in chunks. 0 = chunk-major (min memory);
+//                >= MAX_CHUNKS_PER_LEVEL = level-major (worst case, max memory).
+//   LLM_JITTER : +/- reorder window around each slot (0 = clean deterministic pipeline).
+//   LLM_SEED   : fixes the jitter pattern. FIX it when comparing TLRAM sizes; sweep it for variance.
+#ifndef LLM_LAG
+#define LLM_LAG 2
+#endif
+#ifndef LLM_JITTER
+#define LLM_JITTER 0
+#endif
+#ifndef LLM_SEED
+#define LLM_SEED 1
+#endif
+
 // Define metadata values (example)
 #define META_COLL_ID   0xABCD
 #define META_COLL_TYPE 0x01
@@ -308,6 +324,14 @@ static inline float raw16_to_float(uint16_t raw) {
 }
 
 // Generate the nth permutation of numbers 0 to n-1 (0-indexed)
+// Self-contained LCG for arrival-order jitter — kept separate from the global rand()
+// (which is reserved for reproducible input data, srand(1234)).
+static uint32_t llm_rng_state = 1;
+static inline uint32_t llm_rand(void) {
+    llm_rng_state = llm_rng_state * 1103515245u + 12345u;
+    return (llm_rng_state >> 16) & 0x7FFFu;
+}
+
 void generate_nth_permutation(int* perm, int n, int nth) {
     // Initialize with sequential numbers
     for (int i = 0; i < n; i++) {
@@ -490,6 +514,7 @@ int main() {
     static uint32_t input_elements[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_PACKED_WORDS] __attribute__((aligned(64)));
     static uint32_t expected_outputs[NUM_LEVELS][MAX_CHUNKS_PER_LEVEL][NUM_PACKED_WORDS] __attribute__((aligned(64)));
     static int packet_order[NUM_LEVELS * MAX_CHUNKS_PER_LEVEL];  // Order for all chunk packets
+    static int packet_key[NUM_LEVELS * MAX_CHUNKS_PER_LEVEL];    // sort keys for the arrival-order model
 
     // --- 1. NIC Initialization (Implicit) ---
     printf("SimpleNIC assumed ready after reset.\n");
@@ -543,18 +568,35 @@ int main() {
         uint32_t total_chunks = MAX_CHUNKS_PER_LEVEL;
         printf("Testing with %u chunks per level\n", total_chunks);
         
-        // Create array of all packets to be sent.
-        // FIXED, DETERMINISTIC ORDER (natural order: level0 chunks, then level1, ...).
-        // We deliberately do NOT shuffle here: for a latency study the send order must be
-        // identical across configs so cycle deltas come from the config (numMemoryBlocks /
-        // chunk count), not from packet ordering. (generate_nth_permutation is kept available
-        // if a specific worst-case interleaving is ever needed.)
+        // Build the send order from the pipelined arrival model (LAG + optional jitter).
+        // Packet i encodes level=i/total_chunks, chunk=i%total_chunks.
+        // key = chunk + level*LLM_LAG + jitter ; lower key = sent earlier. This interleaves
+        // higher-level packets into the level-0 stream so chunks finish and free memory
+        // continuously (LAG=0 chunk-major .. LAG>=total_chunks level-major). Deterministic per
+        // (SEED,test_set) so runs stay comparable; jitter only wobbles within +/-LLM_JITTER.
         int total_packets = NUM_LEVELS * total_chunks;
+        llm_rng_state = (uint32_t)(LLM_SEED + test_set + 1);
         for (int i = 0; i < total_packets; i++) {
+            int level  = i / total_chunks;
+            int chunk  = i % total_chunks;
+            int jitter = (LLM_JITTER > 0)
+                       ? ((int)(llm_rand() % (2u * (unsigned)LLM_JITTER + 1u)) - LLM_JITTER)
+                       : 0;
+            packet_key[i]   = chunk + level * LLM_LAG + jitter;
             packet_order[i] = i;
         }
+        // Stable selection sort of packet_order by key (tie-break by packet index -> lower level first).
+        for (int a = 0; a < total_packets - 1; a++) {
+            int best = a;
+            for (int b = a + 1; b < total_packets; b++) {
+                int kb = packet_key[packet_order[b]], kbest = packet_key[packet_order[best]];
+                if (kb < kbest || (kb == kbest && packet_order[b] < packet_order[best])) best = b;
+            }
+            if (best != a) { int t = packet_order[a]; packet_order[a] = packet_order[best]; packet_order[best] = t; }
+        }
 
-        printf("Total packets to send: %d (fixed natural order)\n", total_packets);
+        printf("Total packets to send: %d (LAG=%d JITTER=%d SEED=%d)\n",
+               total_packets, LLM_LAG, LLM_JITTER, LLM_SEED);
         printf("Send order for test set %d: ", test_set);
         for (int i = 0; i < total_packets; i++) {
             printf("%d ", packet_order[i]);
