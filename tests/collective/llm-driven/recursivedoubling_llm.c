@@ -40,6 +40,10 @@ static inline void sim_fail(uint64_t code) {
 #define METADATA_LEN 16        // Fixed metadata size
 #define DATA_PAYLOAD_LEN (NUM_ELEMENTS * BYTES_PER_ELEMENT) // 256 * 4 = 1024
 #define TOTAL_PACKET_LEN (ETH_HEADER_LEN + METADATA_LEN + DATA_PAYLOAD_LEN)  // 16 + 16 + 1024 = 1056
+// Stride of one prebuilt TX slot: TOTAL_PACKET_LEN rounded up to a 64B boundary so every slot
+// stays cache-line aligned for the NIC's DMA read.
+#define TX_SLOT_SIZE (((TOTAL_PACKET_LEN) + 63) & ~63)
+#define TOTAL_TX_PACKETS (NUM_LEVELS * MAX_CHUNKS_PER_LEVEL)
 
 #define MAX_RECURSION_LEVEL 3 // Max level to test (matches module config)
 
@@ -84,7 +88,10 @@ static inline void sim_fail(uint64_t code) {
 #define FP_FORMAT_FP32     0x00  // 32-bit float: 256 elements/chunk
 #define FP_FORMAT_BFLOAT16 0x01  // 16-bit bfloat: 512 elements/chunk
 #define FP_FORMAT_DLFLOAT  0x02  // 16-bit DLFloat: 512 elements/chunk
-#define TEST_FP_FORMAT     FP_FORMAT_DLFLOAT  // Change to test other formats
+// Override at build time: make FORMAT=FP_FORMAT_FP32 (default below keeps prior behaviour).
+#ifndef TEST_FP_FORMAT
+#define TEST_FP_FORMAT     FP_FORMAT_DLFLOAT
+#endif
 
 // Format-conditional element configuration
 #if TEST_FP_FORMAT == FP_FORMAT_FP32
@@ -502,7 +509,10 @@ int main() {
 
     // Allocate buffers (static for bare-metal)
     // Ensure alignment for potential DMA requirements by NIC
-    static uint8_t tx_buf[BUF_SIZE] __attribute__((aligned(64)));
+    // Prebuilt TX packets, one slot per packet_index (= level*total_chunks + chunk). Built once
+    // per test set BEFORE the latency window opens, so the timed loop only hands the NIC an
+    // address instead of memset+memcpy-ing ~3KB per packet.
+    static uint8_t tx_pkt[TOTAL_TX_PACKETS][TX_SLOT_SIZE] __attribute__((aligned(64)));
     static uint8_t rx_buf[BUF_SIZE] __attribute__((aligned(64)));
     static uint8_t expected_rx_buf[BUF_SIZE] __attribute__((aligned(64)));
 
@@ -688,6 +698,7 @@ int main() {
         int total_expected_responses = total_chunks;  // Only Level 4 responses
         int responses_received = 0;
         int packets_sent = 0;
+        int send_comps_seen = 0;   // send completions popped (drained non-blockingly, see 1b)
         int received_chunks_l4[MAX_CHUNKS_PER_LEVEL]; // Track Level 4 chunks received
 
         // A stall detector
@@ -698,6 +709,83 @@ int main() {
         for (int c = 0; c < MAX_CHUNKS_PER_LEVEL; c++) {
             received_chunks_l4[c] = 0;
         }
+
+        // --- Prebuild every TX packet BEFORE the timing window opens ---
+        // The timed loop used to memset(2048) + memcpy(1024) + rebuild headers for every packet,
+        // so the core (not the accelerator) set the send rate. Payloads here are fully
+        // deterministic, so all of that work moves outside cycle_start..cycle_end and the timed
+        // loop is left with a single MMIO write per packet.
+        // Prebuilding is also what makes the non-blocking send SAFE: each packet owns its own
+        // slot, so the NIC can still be DMA-reading packet N while we queue packet N+1. With the
+        // old single shared tx_buf, dropping the completion wait would corrupt the in-flight
+        // packet.
+        for (int packet_index = 0; packet_index < total_packets_to_send; packet_index++) {
+            int level = packet_index / total_chunks;
+            int chunk = packet_index % total_chunks;
+            uint8_t *pkt = tx_pkt[packet_index];
+
+            memset(pkt, 0, TX_SLOT_SIZE);
+
+            // --- Ethernet Header (16 bytes: 14 bytes header + 2 bytes padding) ---
+            // Level 0: from Tester to Accelerator.
+            // Level 1-3: simulating a packet FROM a partner accelerator TO our accelerator.
+            uint64_t src_mac, dst_mac;
+            if (level == 0) {
+                src_mac = tester_mac;
+                dst_mac = accel_mac;
+            } else {
+                uint8_t partner_rank = calculate_partner_rank(level, TEST_NODE_RANK);
+                src_mac = BASE_MAC | (uint64_t)(partner_rank + ACCELERATOR_MAC_OFFSET);
+                dst_mac = accel_mac;
+            }
+
+            // Wire format: [padding(2B) | dstmac(6B) | srcmac(6B) | ethType(2B)]
+            pkt[0] = 0x00;
+            pkt[1] = 0x00;
+            WRITE_MAC_TO_BUF(pkt, 2, dst_mac);
+            WRITE_MAC_TO_BUF(pkt, 8, src_mac);
+            pkt[14] = 0x00;
+            pkt[15] = 0x00;
+
+            // --- Metadata (16 bytes, starting at offset 16) ---
+            uint8_t *metadata = pkt + ETH_HEADER_LEN;
+            metadata[0] = (uint8_t)(test_collective_id & 0xFF);
+            metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
+            metadata[2] = META_COLL_TYPE;
+            metadata[3] = META_OP;
+            metadata[4] = TEST_FP_FORMAT;  // FP format
+            metadata[5] = 0;  // Reserved (rank only used in Setup packets)
+            metadata[6] = MAX_RECURSION_LEVEL;
+            metadata[7] = (uint8_t)level;
+
+            uint32_t chunk_index = (uint32_t)chunk;
+            memcpy(metadata + 8, &chunk_index, sizeof(uint32_t));
+            memcpy(metadata + 12, &total_chunks, sizeof(uint32_t));
+
+            // --- Data Payload (starting at offset 32) ---
+            memcpy(pkt + ETH_HEADER_LEN + METADATA_LEN, input_elements[level][chunk], DATA_PAYLOAD_LEN);
+
+            // MAC sanity check on the first packet that will actually go out. This is a
+            // build-time property of the packet, so it belongs here, not in the timed loop
+            // (where it also dragged a printf inside the measurement window).
+            if (packet_index == packet_order[0]) {
+                uint64_t tx_src_mac_check = 0, tx_dst_mac_check = 0;
+                for (int i = 0; i < 6; i++) {
+                    tx_dst_mac_check |= ((uint64_t)pkt[2 + i]) << ((5 - i) * 8);
+                    tx_src_mac_check |= ((uint64_t)pkt[8 + i]) << ((5 - i) * 8);
+                }
+                printf("FIRST PACKET TX: Level %d, src_mac=0x%012lx, dst_mac=0x%012lx (expected src=0x%012lx, dst=0x%012lx)\n",
+                       level, (unsigned long)tx_src_mac_check, (unsigned long)tx_dst_mac_check,
+                       (unsigned long)src_mac, (unsigned long)dst_mac);
+                if (tx_src_mac_check != src_mac || tx_dst_mac_check != dst_mac) {
+                    printf("ERROR: MAC mismatch in TX buffer! Buffer corrupted?\n");
+                }
+            }
+        }
+        // Make every prebuilt slot visible to the NIC's DMA engine before any request is queued.
+        asm volatile ("fence");
+        printf("Prebuilt %d TX packets (%d B/slot) outside the timing window.\n",
+               total_packets_to_send, (int)TX_SLOT_SIZE);
 
         // --- Flush any pending receive completions from NIC initialization ---
         // This ensures we don't process any garbage data that might be in the NIC buffers
@@ -721,91 +809,43 @@ int main() {
         // --- Main polling loop ---
         while (responses_received < total_expected_responses) {
 
-            // === 1. POLL AND TRY TO SEND ===
-            // Can we send? (NIC has buffer space AND we have packets left to send)
+            // === 1. TRY TO SEND (non-blocking) ===
+            // Queue a prebuilt packet if the NIC has a free request slot. We deliberately do NOT
+            // wait for SEND_COMP here: nic_send() spun on it, which stalled this whole loop --
+            // including the receive polling in section 2 -- for the duration of a 1KB DMA read,
+            // defeating the non-blocking guard on this very if(). Completions are reaped in 1b.
             if (nic_send_req_avail() > 0 && packets_sent < total_packets_to_send) {
                 int packet_index = packet_order[packets_sent];
-                int level = packet_index / total_chunks;
-                int chunk = packet_index % total_chunks;
+                uint8_t *pkt = tx_pkt[packet_index];
 
                 #if DEBUG_PRINT_PACKETS
+                    int level = packet_index / total_chunks;
+                    int chunk = packet_index % total_chunks;
                     printf("Sending Packet %d/%d (order[%d]=%d): Level %d, Chunk %d\n", packets_sent+1, total_packets_to_send, packets_sent, packet_index, level, chunk);
                 #endif
 
-                // Construct TX Packet with Ethernet header
-                memset(tx_buf, 0, BUF_SIZE);
-                
-                // --- Ethernet Header (16 bytes: 14 bytes header + 2 bytes padding) ---
-                // For Level 0 packets: from Tester to Accelerator
-                // For Level 1-3 packets: Simulating packet FROM partner accelerator TO our accelerator
-                uint64_t src_mac, dst_mac;
-
-                if (level == 0) {
-                    // Level 0: From Tester to our Accelerator
-                    src_mac = tester_mac;
-                    dst_mac = accel_mac;
-                } else {
-                    // Level 1-3: Simulating INCOMING packet FROM Partner Accelerator TO our Accelerator
-                    // With loopback harness, these packets will be looped back from switchio.out to switchio.in
-                    uint8_t partner_rank = calculate_partner_rank(level, TEST_NODE_RANK);
-                    src_mac = BASE_MAC | (uint64_t)(partner_rank + ACCELERATOR_MAC_OFFSET); // Source = Partner Accelerator
-                    dst_mac = accel_mac; // Dest = Our Accelerator
-                }
-                
-                // Ethernet header wire format: [padding(2B) | dstmac(6B) | srcmac(6B) | ethType(2B)]
-                // Use WRITE_MAC_TO_BUF for consistent network byte order
-                tx_buf[0] = 0x00;   // Padding byte 0
-                tx_buf[1] = 0x00;   // Padding byte 1
-                WRITE_MAC_TO_BUF(tx_buf, 2, dst_mac);   // Destination MAC (6 bytes)
-                WRITE_MAC_TO_BUF(tx_buf, 8, src_mac);   // Source MAC (6 bytes)
-                tx_buf[14] = 0x00;  // EtherType byte 0
-                tx_buf[15] = 0x00;  // EtherType byte 1
-                
-                // --- Metadata (16 bytes, starting at offset 16) ---
-                uint8_t *metadata = tx_buf + ETH_HEADER_LEN;
-                metadata[0] = (uint8_t)(test_collective_id & 0xFF);
-                metadata[1] = (uint8_t)((test_collective_id >> 8) & 0xFF);
-                metadata[2] = META_COLL_TYPE;
-                metadata[3] = META_OP;
-                metadata[4] = TEST_FP_FORMAT;  // FP format
-                metadata[5] = 0;  // Reserved (rank only used in Setup packets)
-                metadata[6] = MAX_RECURSION_LEVEL;
-                metadata[7] = (uint8_t)level;
-
-                // --- Word 1 (Offset 8 in metadata, 24 total): Chunked Metadata ---
-                uint32_t chunk_index = (uint32_t)chunk;
-                memcpy(metadata + 8, &chunk_index, sizeof(uint32_t));
-                memcpy(metadata + 12, &total_chunks, sizeof(uint32_t));
-
-                // --- Data Payload (starting at offset 32) ---
-                memcpy(tx_buf + ETH_HEADER_LEN + METADATA_LEN, input_elements[level][chunk], DATA_PAYLOAD_LEN);
-
-                // Verify MAC addresses in buffer before sending (especially for first packet)
-                // Read in NETWORK ORDER (MSB first) to match WRITE_MAC_TO_BUF
-                uint64_t tx_src_mac_check = 0, tx_dst_mac_check = 0;
-                for (int i = 0; i < 6; i++) {
-                    tx_dst_mac_check |= ((uint64_t)tx_buf[2 + i]) << ((5 - i) * 8);
-                    tx_src_mac_check |= ((uint64_t)tx_buf[8 + i]) << ((5 - i) * 8);
-                }
-                if (packets_sent == 0) {
-                    printf("FIRST PACKET TX: Level %d, src_mac=0x%012lx, dst_mac=0x%012lx (expected src=0x%012lx, dst=0x%012lx)\n",
-                           level, (unsigned long)tx_src_mac_check, (unsigned long)tx_dst_mac_check,
-                           (unsigned long)src_mac, (unsigned long)dst_mac);
-                    if (tx_src_mac_check != src_mac || tx_dst_mac_check != dst_mac) {
-                        printf("ERROR: MAC mismatch in TX buffer! Buffer corrupted?\n");
-                    }
-                }
-
-                nic_send(tx_buf, (unsigned long)TOTAL_PACKET_LEN);
+                // Packet is already built (see the prebuild loop above); just hand the NIC the
+                // address + length. Request word format: [len(16b) | addr(48b)].
+                uint64_t send_req = ((uint64_t)TOTAL_PACKET_LEN << 48)
+                                  | ((uintptr_t)pkt & ((1L << 48) - 1));
+                reg_write64(SIMPLENIC_SEND_REQ, send_req);
 
                 #if DEBUG_PRINT_PACKETS
                     printf("\n--- Sent Packet Details ---\n");
-                    print_packet_metadata("TX", tx_buf + ETH_HEADER_LEN);
-                    print_elements_f("TX", (const uint32_t*)(tx_buf + ETH_HEADER_LEN + METADATA_LEN), 8);
+                    print_packet_metadata("TX", pkt + ETH_HEADER_LEN);
+                    print_elements_f("TX", (const uint32_t*)(pkt + ETH_HEADER_LEN + METADATA_LEN), 8);
                 #endif
 
                 packets_sent++;
                 stall_counter = 0; // Reset stall counter because we made progress
+            }
+
+            // === 1b. REAP SEND COMPLETIONS (non-blocking) ===
+            // Completions must still be popped or the completion queue fills and the NIC stops
+            // accepting new send requests -- but popping them here never blocks the loop.
+            while (nic_send_comp_avail() > 0) {
+                reg_read16(SIMPLENIC_SEND_COMP);
+                send_comps_seen++;
             }
 
             // === 2. POLL FOR A COMPLETED RECEIVE ===
