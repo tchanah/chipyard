@@ -701,12 +701,7 @@ int main() {
         int send_comps_seen = 0;   // send completions popped (drained non-blockingly, see 1b)
         int received_chunks_l4[MAX_CHUNKS_PER_LEVEL]; // Track Level 4 chunks received
 
-        // A stall detector, measured in CYCLES via rdcycle() -- not in loop iterations.
-        // It used to count passes of the polling loop, but each pass costs several slow MMIO
-        // reads, so 10M iterations ran far past the simulator's own 100M-cycle +max-cycles cap.
-        // A wedged run therefore died on TestDriver.v:147 with no diagnostic instead of tripping
-        // this detector. Comparing rdcycle() deltas (as the latency_tester already does) makes
-        // the threshold mean what it says and fails fast with a code.
+        // Stall detector: no forward progress for this many cycles means the pipeline is wedged.
         // ~20x a healthy collective (~100k cycles at the blk16/ch16 baseline).
         const uint64_t STALL_TIMEOUT_CYCLES = 2000000;
         uint64_t last_progress_cycle = rdcycle();
@@ -843,7 +838,7 @@ int main() {
                 #endif
 
                 packets_sent++;
-                last_progress_cycle = rdcycle(); // Made progress
+                last_progress_cycle = rdcycle();
             }
 
             // === 1b. REAP SEND COMPLETIONS (non-blocking) ===
@@ -1054,7 +1049,7 @@ int main() {
                 #endif
                 
                 responses_received++;
-                last_progress_cycle = rdcycle(); // Made progress
+                last_progress_cycle = rdcycle();
 
                 // --- If more packets are expected, re-post the buffer ---
                 if (responses_received < total_expected_responses) {
