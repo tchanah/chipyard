@@ -102,7 +102,10 @@ class FastRTLSimRocketConfig extends Config(
   new chipyard.RocketConfig)
 
 class RecursiveDoublingWithDMARocketConfig extends Config(
-  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, maxChunks = 64) ++
+  // EnableStats is independent of EnableDebug, so this config now emits STATE_SUMMARY without
+  // any functional trace output. NOTE: numMemoryBlocks still defaults to 1024 (1MB) here, so this
+  // config is not yet comparable to the Boom one above (blk16) for TLRAM work.
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, EnableStats = true, maxChunks = 64) ++
   new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++
   new icenet.WithIceNIC ++
   new freechips.rocketchip.subsystem.WithNBigCores(1) ++ 

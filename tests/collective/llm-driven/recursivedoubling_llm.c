@@ -701,9 +701,15 @@ int main() {
         int send_comps_seen = 0;   // send completions popped (drained non-blockingly, see 1b)
         int received_chunks_l4[MAX_CHUNKS_PER_LEVEL]; // Track Level 4 chunks received
 
-        // A stall detector
-        const uint64_t STALL_TIMEOUT_CYCLES = 10000000; // Adjust as needed
-        uint64_t stall_counter = 0;
+        // A stall detector, measured in CYCLES via rdcycle() -- not in loop iterations.
+        // It used to count passes of the polling loop, but each pass costs several slow MMIO
+        // reads, so 10M iterations ran far past the simulator's own 100M-cycle +max-cycles cap.
+        // A wedged run therefore died on TestDriver.v:147 with no diagnostic instead of tripping
+        // this detector. Comparing rdcycle() deltas (as the latency_tester already does) makes
+        // the threshold mean what it says and fails fast with a code.
+        // ~20x a healthy collective (~100k cycles at the blk16/ch16 baseline).
+        const uint64_t STALL_TIMEOUT_CYCLES = 2000000;
+        uint64_t last_progress_cycle = rdcycle();
 
         // Initialize tracking array for Level 4 chunks only
         for (int c = 0; c < MAX_CHUNKS_PER_LEVEL; c++) {
@@ -837,7 +843,7 @@ int main() {
                 #endif
 
                 packets_sent++;
-                stall_counter = 0; // Reset stall counter because we made progress
+                last_progress_cycle = rdcycle(); // Made progress
             }
 
             // === 1b. REAP SEND COMPLETIONS (non-blocking) ===
@@ -1048,7 +1054,7 @@ int main() {
                 #endif
                 
                 responses_received++;
-                stall_counter = 0; // Reset stall counter because we made progress
+                last_progress_cycle = rdcycle(); // Made progress
 
                 // --- If more packets are expected, re-post the buffer ---
                 if (responses_received < total_expected_responses) {
@@ -1059,8 +1065,7 @@ int main() {
 
             // === 3. CHECK FOR STALL ===
             if (packets_sent == total_packets_to_send && responses_received < total_expected_responses) {
-                stall_counter++;
-                if (stall_counter > STALL_TIMEOUT_CYCLES) {
+                if ((rdcycle() - last_progress_cycle) > STALL_TIMEOUT_CYCLES) {
                     // All packets sent but responses never completed -> the pipeline is wedged.
                     // The most likely cause in this study is the DEADLOCK FLOOR: numMemoryBlocks is
                     // too small for the working set, so the allocator can never free a block to make

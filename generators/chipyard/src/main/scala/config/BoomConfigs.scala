@@ -87,7 +87,10 @@ class SimpleDmaControllerConfig extends Config(
 class RecursiveDoublingWithDMAConfig extends Config(
   // numMemoryBlocks is the single memory knob: TLRAM span = numMemoryBlocks * bytesPerChunk (1KB).
   // 1024 -> 1MB (baseline, unchanged). Edit this (keep a power of 2) to shrink memory / force reuse.
-  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = true, maxChunks = 64, numMemoryBlocks = 16) ++  // Add the custom module (Verilator: use RegInit)
+  // EnableStats = timing counters + the one-line STATE_SUMMARY per collective (keep on for DSE runs).
+  // EnableDebug = functional traces + the per-chunk STATE_CYCLES line; kept on only to cross-check the
+  // summary against the last per-chunk line during verification -- set it false for actual sweeps.
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = true, EnableStats = true, maxChunks = 64, numMemoryBlocks = 16) ++  // Add the custom module (Verilator: use RegInit)
   new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++   // Add the custom harness for the module
   new icenet.WithIceNIC ++                            // Add the NIC
   new boom.common.WithNLargeBooms(1) ++

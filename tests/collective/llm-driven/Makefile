@@ -38,8 +38,10 @@ SETS   ?= 2
 LAG    ?= 2      # arrival pipeline depth (chunks): 0=chunk-major, >=CHUNKS=level-major
 JITTER ?= 0      # +/- reorder window around each pipeline slot (0 = clean pipeline)
 SEED   ?= 1      # jitter pattern seed (fix it to compare configs; sweep it for variance)
+FORMAT ?= FP_FORMAT_DLFLOAT   # FP_FORMAT_FP32 | FP_FORMAT_BFLOAT16 | FP_FORMAT_DLFLOAT
 DEFS    = -DMAX_CHUNKS_PER_LEVEL=$(CHUNKS) -DNUM_TEST_SETS=$(SETS) \
-          -DLLM_LAG=$(LAG) -DLLM_JITTER=$(JITTER) -DLLM_SEED=$(SEED)
+          -DLLM_LAG=$(LAG) -DLLM_JITTER=$(JITTER) -DLLM_SEED=$(SEED) \
+          -DTEST_FP_FORMAT=$(FORMAT)
 
 SRC = recursivedoubling_llm.c
 BIN = recursivedoubling_llm.riscv
