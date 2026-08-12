@@ -6,26 +6,28 @@ Single-instance Verilator tester to measure **relative latency (cycles)** of the
 | Knob | Where | Effect |
 |------|-------|--------|
 | `numMemoryBlocks` | `generators/chipyard/src/main/scala/config/BoomConfigs.scala` (the `WithRecursiveDoublingWithDMA(...)` call) | TLRAM size = `numMemoryBlocks × 1 KB` (derived in `NIC.scala`). Keep a **power of 2**. Shrinking it forces block reuse. |
-| `MAX_CHUNKS_PER_LEVEL` | this tester, via `make CHUNKS=<N>` | chunks actually sent per level (data volume). Must stay **< hardware `maxChunks`** (config) or chunk indices silently alias. |
+| `MAX_CHUNKS_PER_LEVEL` | this tester, via `-D LLM_CHUNKS=<N>` | chunks actually sent per level (data volume). Must stay **< hardware `maxChunks`** (config) or chunk indices silently alias. |
 
 Packet size is fixed at **1 KB** (1 block = 1 KB), so `numMemoryBlocks` maps 1:1 to KB of TLRAM.
 
 ## Build
 
 ```bash
-cd tests/collective/llm-driven
-make clean && make CHUNKS=4 SETS=1     # -DMAX_CHUNKS_PER_LEVEL=4 -DNUM_TEST_SETS=1
+cmake -S tests -B tests/build -D LLM_CHUNKS=4 -D LLM_SETS=1   # -DMAX_CHUNKS_PER_LEVEL=4 -DNUM_TEST_SETS=1
+cmake --build tests/build --target recursivedoubling_llm
 ```
-Defaults: `CHUNKS=4`, `SETS=2`. **Run `make clean` between `CHUNKS`/`SETS` changes** — the value is a
-`-D` define, not a file dependency, so a bare `make` won't recompile.
+Defaults: `LLM_CHUNKS=4`, `LLM_SETS=2` (also `LLM_LAG=2`, `LLM_JITTER=0`, `LLM_SEED=1`,
+`LLM_FORMAT=FP_FORMAT_DLFLOAT` — see `tests/CMakeLists.txt`). These are real CMake cache variables, not
+raw `-D` defines, so re-running the `cmake -S ... -D` configure step with a new value automatically
+triggers a rebuild of `recursivedoubling_llm` — no `make clean` needed between sweeps.
 
 ## Run
 
 ```bash
-cd ../../../sims/verilator
+cd sims/verilator
 make CONFIG=RecursiveDoublingWithDMAConfig                # rebuild only after a Scala/config change
 make CONFIG=RecursiveDoublingWithDMAConfig \
-     BINARY=../../tests/collective/llm-driven/recursivedoubling_llm.riscv \
+     BINARY=../../tests/build/recursivedoubling_llm.riscv \
      run-binary 2>&1 | tee logs/llm_blk<N>_chunks<M>
 grep -E "LATENCY_CSV|SUCCESS|DEADLOCK" logs/llm_blk<N>_chunks<M>
 ```

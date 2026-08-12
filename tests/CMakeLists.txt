@@ -143,3 +143,65 @@ add_custom_command(
 add_custom_target(spiflash_img ALL
     DEPENDS ${CMAKE_BINARY_DIR}/spiflash.img
 )
+
+
+#################################
+# Collective (icenet/collective) tests
+#
+# Ported from tests/Makefile + tests/collective/{latency_tester,throughput_tester,llm-driven}/Makefile
+# (fork's collective-llm-v2026.06 branch). All collective binaries need
+# -Wl,-u,_printf_float -- without it, %f prints garbage because the linker
+# doesn't pull in the float-formatting stub unless forced.
+#################################
+
+function(add_collective_test target src)
+    add_executable(${target} ${src})
+    target_link_options(${target} PRIVATE -Wl,-u,_printf_float)
+    add_dump_target(${target})
+endfunction()
+
+function(add_collective_node_tests prefix src)
+    foreach(rank RANGE 0 7)
+        set(tgt ${prefix}-node${rank})
+        add_executable(${tgt} ${src})
+        target_compile_definitions(${tgt} PRIVATE NODE_RANK=${rank})
+        target_link_options(${tgt} PRIVATE -Wl,-u,_printf_float)
+        add_dump_target(${tgt})
+    endforeach()
+endfunction()
+
+# --- Single-instance (Verilator-runnable) ---
+add_collective_test(packetmodifier                collective/packetmodifier.c)
+add_collective_test(recursivedoubling              collective/recursivedoubling.c)
+add_collective_test(simpledmacontrollertest        collective/simpledmacontrollertest.c)
+add_collective_test(recursivedoublingdma           collective/recursivedoublingdma.c)
+add_collective_test(recursivedoublingwithdmafp     collective/recursivedoublingwithdmafp.c)
+add_collective_test(recursivedoublingforchunks     collective/recursivedoublingforchunks.c)
+add_collective_test(recursivedoublingforchunksveri collective/recursivedoublingforchunksveri.c)
+
+# --- 8-node variants (FireSim-only; build-only under Verilator) ---
+add_collective_node_tests(rdchunks         collective/recursivedoublingforchunks.c)
+add_collective_node_tests(pytorch-listener collective/pytorch_listener.c)
+add_collective_node_tests(rdlatency        collective/latency_tester/recursivedoubling_latency.c)
+add_collective_node_tests(rdthroughput     collective/throughput_tester/recursivedoubling_throughput.c)
+
+# --- LLM-driven tester: sweep knobs as real CMake cache vars (fixes the old
+#     Makefile's "changing -D doesn't trigger a rebuild" footgun) ---
+set(LLM_CHUNKS 4                     CACHE STRING "MAX_CHUNKS_PER_LEVEL (must stay < hardware maxChunks)")
+set(LLM_SETS   2                     CACHE STRING "NUM_TEST_SETS")
+set(LLM_LAG    2                     CACHE STRING "arrival pipeline depth in chunks (0=chunk-major, >=CHUNKS=level-major)")
+set(LLM_JITTER 0                     CACHE STRING "+/- reorder window around each pipeline slot (0 = clean pipeline)")
+set(LLM_SEED   1                     CACHE STRING "jitter pattern seed")
+set(LLM_FORMAT FP_FORMAT_DLFLOAT     CACHE STRING "FP_FORMAT_FP32 | FP_FORMAT_BFLOAT16 | FP_FORMAT_DLFLOAT")
+
+add_executable(recursivedoubling_llm collective/llm-driven/recursivedoubling_llm.c)
+target_compile_definitions(recursivedoubling_llm PRIVATE
+    MAX_CHUNKS_PER_LEVEL=${LLM_CHUNKS}
+    NUM_TEST_SETS=${LLM_SETS}
+    LLM_LAG=${LLM_LAG}
+    LLM_JITTER=${LLM_JITTER}
+    LLM_SEED=${LLM_SEED}
+    TEST_FP_FORMAT=${LLM_FORMAT}
+)
+target_link_options(recursivedoubling_llm PRIVATE -Wl,-u,_printf_float)
+add_dump_target(recursivedoubling_llm)
