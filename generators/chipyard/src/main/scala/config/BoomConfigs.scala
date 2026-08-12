@@ -156,16 +156,11 @@ class SimpleDmaControllerConfig extends Config(
   new chipyard.config.AbstractConfig)
 
 class RecursiveDoublingWithDMAConfig extends Config(
-  // numMemoryBlocks is the single memory knob: TLRAM span = numMemoryBlocks * bytesPerChunk (1KB).
-  // 1024 -> 1MB (baseline, unchanged). Edit this (keep a power of 2) to shrink memory / force reuse.
-  // EnableStats = timing counters + the one-line STATE_SUMMARY per collective (keep on for DSE runs).
-  // EnableDebug = functional traces + the per-chunk STATE_CYCLES line; kept on only to cross-check the
-  // summary against the last per-chunk line during verification -- set it false for actual sweeps.
-  // memWidth = DMA beat width in bits (power of 2, >= dataWidth). 128 -> 16 B beats, 256 -> 32 B.
-  // Network-side io.in/io.out stay at NET_IF_WIDTH regardless; this is the TLRAM port only.
-  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = true, EnableStats = true, maxChunks = 64, numMemoryBlocks = 16, memWidth = 256) ++  // Add the custom module (Verilator: use RegInit)
-  new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++   // Add the custom harness for the module
-  new icenet.WithIceNIC ++                            // Add the NIC
+  // numMemoryBlocks=16 -> 16KB TLRAM (forces reuse, power of 2). memWidth=256 -> 32B DMA beats.
+  // EnableDebug=false for steady-state runs; flip true only to cross-check per-chunk trace vs summary.
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, EnableStats = false, maxChunks = 64, numMemoryBlocks = 16, memWidth = 256) ++ 
+  new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++ 
+  new icenet.WithIceNIC ++ 
   new boom.v3.common.WithNLargeBooms(1) ++
   new chipyard.config.WithSystemBusWidth(128) ++
   new chipyard.config.AbstractConfig)

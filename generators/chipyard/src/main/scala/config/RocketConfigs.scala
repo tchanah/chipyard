@@ -126,10 +126,8 @@ class AsyncResetRocketConfig extends Config(
   new MulticlockRocketConfig)
 
 class RecursiveDoublingWithDMARocketConfig extends Config(
-  // EnableStats is independent of EnableDebug, so this config now emits STATE_SUMMARY without
-  // any functional trace output. NOTE: numMemoryBlocks still defaults to 1024 (1MB) here, so this
-  // config is not yet comparable to the Boom one above (blk16) for TLRAM work.
-  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, EnableStats = true, maxChunks = 64) ++
+  // Matches Boom RecursiveDoublingWithDMAConfig's TLRAM sizing for comparable cycle counts.
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, EnableStats = false, maxChunks = 64, numMemoryBlocks = 16, memWidth = 256) ++
   new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++
   new icenet.WithIceNIC ++
   new freechips.rocketchip.rocket.WithNBigCores(1) ++
