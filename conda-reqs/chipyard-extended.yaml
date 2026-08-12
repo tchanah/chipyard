@@ -16,7 +16,6 @@ dependencies:
     - constructor
 
     # misc
-    - pre-commit
     - readline
 
     # firemarshal deps
@@ -30,11 +29,11 @@ dependencies:
     - bison
     - flex
     - expat
-    - python>=3.9
+    - python>=3.9,<3.11
     - bc
     - unzip
     - patch
-    - which
+    - which=2.21=h0b41bf4_1
     - sed
     - diffutils
     - bash
@@ -64,13 +63,21 @@ dependencies:
     - graphviz
     - expect
 
+    # zephyr deps
+    - ninja
+    - gperf
+    - ccache
+    - dtc
+    - west
+    - pyelftools
+
     # clang-format for driver coding style enforcement.
     - clang-format
     - clang-tools
 
     # hammer packages
     - sty
-    - open_pdks.sky130a
+    # - open_pdks.sky130a
     - pip:
         - hammer-vlsi[asap7]==1.2.0
 
@@ -119,3 +126,4 @@ dependencies:
     - fsspec
     - pip:
         - fab-classic>=1.19.2
+        - bcrypt<4.0.0

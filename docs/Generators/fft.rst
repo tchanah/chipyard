@@ -7,7 +7,7 @@ Configuration
 --------------------------
 The following configuration creates an 8-point FFT:
 
-.. literalinclude:: ../../generators/chipyard/src/main/scala/config/MMIOAcceleratorConfigs.scala
+.. literalinclude:: ../../generators/fft-generator/chipyard/FFTConfigs.scala
    :language: scala
    :start-after: DOC include start: FFTRocketConfig
    :end-before: DOC include end: FFTRocketConfig
@@ -51,7 +51,7 @@ The :code:`fft.c` test file in the :code:`tests/` directory can be used to verif
 
 Acknowledgements
 --------------------------
-The code for the FFT Generator was adapted from the ADEPT Lab at UC Berkeley's `Hydra Spine <https://adept.eecs.berkeley.edu/projects/hydra-spine/>`_ project.
+The code for the FFT Generator was adapted from the ADEPT Lab at UC Berkeley's `Hydra Spine <https://web.archive.org/web/20240301113936/https://adept.eecs.berkeley.edu/projects/hydra-spine/>`_ project.
 
 Authors for the original project (in no particular order):
 

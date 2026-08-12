@@ -16,8 +16,8 @@ class ChipLikeRocketConfig extends Config(
   //==================================
   // Set up tiles
   //==================================
-  new freechips.rocketchip.subsystem.WithAsynchronousRocketTiles(depth=8, sync=3) ++ // Add async crossings between RocketTile and uncore
-  new freechips.rocketchip.subsystem.WithNBigCores(1) ++                             // 1 RocketTile
+  new freechips.rocketchip.rocket.WithAsynchronousCDCs(depth=8, sync=3) ++ // Add async crossings between RocketTile and uncore
+  new freechips.rocketchip.rocket.WithNHugeCores(1) ++                      // 1 RocketTile
 
   //==================================
   // Set up I/O
@@ -31,7 +31,7 @@ class ChipLikeRocketConfig extends Config(
       isMemoryDevice = true
     )),
     client = Some(testchipip.serdes.SerialTLClientParams()),                            // Allow an external manager to probe this chip
-    phyParams = testchipip.serdes.ExternalSyncSerialParams(width=4)                     // 4-bit bidir interface, sync'd to an external clock
+    phyParams = testchipip.serdes.DecoupledExternalSyncSerialPhyParams(phitWidth=4, flitWidth=16)   // 4-bit bidir interface, sync'd to an external clock
   ))) ++
 
   new freechips.rocketchip.subsystem.WithNoMemPort ++                                   // Remove axi4 mem port
@@ -77,8 +77,8 @@ class ChipBringupHostConfig extends Config(
         size    = BigInt("80000000", 16)
       ))
     )),
-    client = Some(testchipip.serdes.SerialTLClientParams()),                         // Allow chip to access this device's memory (DRAM)
-    phyParams = testchipip.serdes.InternalSyncSerialParams(width=4, freqMHz = 75)    // bringup platform provides the clock
+    client = Some(testchipip.serdes.SerialTLClientParams()),                                        // Allow chip to access this device's memory (DRAM)
+    phyParams = testchipip.serdes.DecoupledInternalSyncSerialPhyParams(phitWidth=4, flitWidth=16, freqMHz = 75) // bringup platform provides the clock
   ))) ++
 
   //============================
@@ -102,12 +102,7 @@ class ChipBringupHostConfig extends Config(
   // Set up clocks of the bringup system
   //=============================
   new chipyard.clocking.WithPassthroughClockGenerator ++ // pass all the clocks through, since this isn't a chip
-  new chipyard.config.WithFrontBusFrequency(75.0) ++     // run all buses of this system at 75 MHz
-  new chipyard.config.WithMemoryBusFrequency(75.0) ++
-  new chipyard.config.WithPeripheryBusFrequency(75.0) ++
-  new chipyard.config.WithSystemBusFrequency(75.0) ++
-  new chipyard.config.WithControlBusFrequency(75.0) ++
-  new chipyard.config.WithOffchipBusFrequency(75.0) ++
+  new chipyard.config.WithUniformBusFrequencies(75.0) ++   // run all buses of this system at 75 MHz
 
   // Base is the no-cores config
   new chipyard.NoCoresConfig)
@@ -132,3 +127,30 @@ class VerilatorCITetheredChipLikeRocketConfig extends Config(
     new chipyard.config.WithNoResetSynchronizers ++
     new ChipLikeRocketConfig) ++
   new chipyard.harness.WithMultiChip(1, new ChipBringupHostConfig))
+
+
+// Example chip with no AXI4 memport which can still use loadmem over serialTL with FastRAM
+class NoAXI4MemPortChipLikeRocketConfig extends Config(
+  new chipyard.harness.WithSimTSIOverSerialTL(fast = true) ++                  // Enable FastRAM
+  new testchipip.serdes.WithSerialTL(
+    Seq(
+      testchipip.serdes.SerialTLParams(
+        manager = Some(                                                        // port acts as a manager of offchip memory
+          testchipip.serdes.SerialTLManagerParams(
+            memParams = Seq(
+              testchipip.serdes.ManagerRAMParams(
+                address = BigInt("80000000", 16),                              // Chipyard DRAM base
+                size = BigInt("100000000", 16)
+              )
+            ),
+            isMemoryDevice = true,
+            slaveWhere = MBUS
+          )
+        ),
+        client = Some(testchipip.serdes.SerialTLClientParams()),               // client for TSI connection
+        phyParams = testchipip.serdes.DecoupledExternalSyncSerialPhyParams()
+      )
+  )) ++
+  new freechips.rocketchip.subsystem.WithNoMemPort ++
+  new freechips.rocketchip.rocket.WithNHugeCores(1) ++
+  new chipyard.config.AbstractConfig)

@@ -14,9 +14,9 @@ dependencies:
     #   instructions on adding a recipe
     # https://docs.conda.io/projects/conda/en/latest/user-guide/concepts/pkg-specs.html#package-match-specifications
     #   documentation on package_spec syntax for constraining versions
-    - gcc<12
-    - gxx<12
-    - sysroot_linux-64=2.17 # needed to match pre-built CI XRT glibc version
+    - gcc=13.2
+    - gxx=13.2
+    - sysroot_linux-64=2.34 # need to be close to system glibc for VCS compatibility
     - conda-gcc-specs
     - binutils
 
@@ -27,9 +27,14 @@ dependencies:
     - pip
     - make
     - git
+    - ninja # needed in case we need to built circt from scratch
+    - libnuma # added to prevent libnuma.so.1 not found err on systems without it
+    - numactl # same as above
 
     - sbt
     - openjdk=20
     - dtc
-    - verilator==5.020
-    - conda-lock=1.4
+    - verilator==5.022
+
+    # used in build-setup.sh as well
+    - conda-lock=2.5.7

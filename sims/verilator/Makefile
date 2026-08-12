@@ -1,9 +1,6 @@
 #########################################################################################
 # verilator makefile
 #########################################################################################
-ifeq ($(shell which verilator),)
-$(error Did not find Verilator in PATH. Make sure all requirements are installed)
-endif
 
 #########################################################################################
 # general path variables
@@ -129,7 +126,7 @@ CHIPYARD_VERILATOR_FLAGS := \
 # options dependent on whether external IP (cva6/NVDLA) or just chipyard is used
 # NOTE: defer the evaluation of this until it is used!
 PLATFORM_OPTS = $(shell \
-	if grep -qiP "module\s+(CVA6|NVDLA)" $(GEN_COLLATERAL_DIR)/*.*v; \
+	if grep -qiP "module\s+(CVA6|NVDLA|Ara)" $(GEN_COLLATERAL_DIR)/*.*v; \
 	then echo "$(VERILOG_IP_VERILATOR_FLAGS)"; \
 	else echo "$(CHIPYARD_VERILATOR_FLAGS)"; fi)
 
@@ -154,6 +151,7 @@ VERILATOR_NONCC_OPTS = \
 	$(VERILATOR_PREPROC_DEFINES) \
 	--top-module $(TB) \
 	--vpi \
+	$(addprefix +incdir+,$(EXT_INCDIRS)) \
 	-f $(sim_common_files)
 
 #----------------------------------------------------------------------------------------
@@ -190,13 +188,16 @@ model_mk_debug = $(model_dir_debug)/V$(TB).mk
 #########################################################################################
 # build makefile fragment that builds the verilator sim rules
 #########################################################################################
+
 $(model_mk): $(sim_common_files) $(EXTRA_SIM_REQS)
+	$(call require_cmd,verilator)
 	rm -rf $(model_dir)
 	mkdir -p $(model_dir)
 	$(VERILATOR) $(VERILATOR_OPTS) $(EXTRA_SIM_SOURCES) -o $(sim) -Mdir $(model_dir)
 	touch $@
 
 $(model_mk_debug): $(sim_common_files) $(EXTRA_SIM_REQS)
+	$(call require_cmd,verilator)
 	rm -rf $(model_dir_debug)
 	mkdir -p $(model_dir_debug)
 	$(VERILATOR) $(VERILATOR_OPTS) +define+DEBUG $(EXTRA_SIM_SOURCES) -o $(sim_debug) $(TRACING_OPTS) -Mdir $(model_dir_debug)
@@ -206,9 +207,11 @@ $(model_mk_debug): $(sim_common_files) $(EXTRA_SIM_REQS)
 # invoke make to make verilator sim rules
 #########################################################################################
 $(sim): $(model_mk) $(dramsim_lib)
+	$(require_riscv)
 	$(MAKE) VM_PARALLEL_BUILDS=1 -C $(model_dir) -f V$(TB).mk
 
 $(sim_debug): $(model_mk_debug) $(dramsim_lib)
+	$(require_riscv)
 	$(MAKE) VM_PARALLEL_BUILDS=1 -C $(model_dir_debug) -f V$(TB).mk
 
 #########################################################################################

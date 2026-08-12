@@ -21,7 +21,7 @@ Block Device Controller
 
 The block device controller provides a generic interface for secondary storage.
 This device is primarily used in FireSim to interface with a block device
-software simulation model. The default Linux configuration in `firesim-software <https://github.com/firesim/firesim-software>`_
+software simulation model. The default Linux configuration in `FireMarshal <https://github.com/firesim/FireMarshal>`_.
 
 To add a block device to your design, add the ``WithBlockDevice`` config fragment to your configuration.
 
@@ -44,7 +44,7 @@ both directions.
 
 For an example of how to use the SERDES classes, take a look at the
 ``SerdesTest`` unit test in `the Test Chip IP unit test suite
-<https://github.com/ucb-bar/testchipip/blob/master/src/main/scala/Unittests.scala>`_.
+<https://github.com/ucb-bar/testchipip/blob/master/src/main/scala/test/Unittests.scala#L138>`_.
 
 TileLink Switcher
 -----------------
@@ -59,7 +59,7 @@ kept stable throughout the remainder of operation. It is not safe to change
 the select signal once TileLink messages have begun sending.
 
 For an example of how to use the switcher, take a look at the ``SwitcherTest``
-unit test in the `Test Chip IP unit tests <https://github.com/ucb-bar/testchipip/blob/master/src/main/scala/Unittests.scala>`_.
+unit test in the `Test Chip IP unit tests <https://github.com/ucb-bar/testchipip/blob/master/src/main/scala/test/Unittests.scala#L483>`_.
 
 TileLink Ring Network
 ---------------------
@@ -70,7 +70,7 @@ than crossbars. This can be useful for chips with very wide TileLink networks
 (many cores and L2 banks) that can sacrifice cross-section bandwidth to relieve
 wire routing congestion. Documentation on how to use the ring network can be
 found in :ref:`Customization/Memory-Hierarchy:The System Bus`. The implementation itself can be found
-`here <https://github.com/ucb-bar/testchipip/blob/master/src/main/scala/Ring.scala>`_,
+`here <https://github.com/ucb-bar/testchipip/blob/master/src/main/scala/soc/Ring.scala>`_,
 and may serve as an example of how to implement your own TileLink network with
 a different topology.
 
@@ -104,3 +104,18 @@ The pin can be added to a system with the ``testchipip.soc.WithChipIdPin`` confi
 width and MMIO address are parameterizable and can be set by passing ``ChipIdPinParams`` as an 
 argument to the config. The width can additionally be set using the ``testchipip.soc.WithChipIdPinWidth``
 config. 
+
+CTC
+---------------
+
+The CTC (Chip-To-Chip) link converts TileLink requests to a simple 32-bit protocol, 
+similar to TSI. This link is intended to connect chiplets in a Chipyard design, and can be 
+added to a multichip config using ``chipyard.harness.WithMultiChipCTC``. To add CTC ports to 
+a single SoC, use ``testchipip.ctc.WithCTC``. Refer to 
+`ChipletConfigs.scala <https://github.com/ucb-bar/chipyard/blob/main/generators/chipyard/src/main/scala/config/ChipletConfigs.scala>`_ 
+for examples of configs with CTC.
+
+By default, CTC uses the credited PHY provided with the Serial TileLink interface (see 
+:ref:`Generators/TestChipIP:TileLink SERDES`). CTC can also be instantiated without a PHY. The 
+intended use for this mode is for multi-chiplet FireSim simulations using the CTC bridge. For 
+more information on FireSim, see :ref:`Simulation/FPGA-Accelerated-Simulation:FireSim`.

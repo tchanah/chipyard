@@ -13,7 +13,7 @@ import chipyard.{BuildSystem, DigitalTop}
 import chipyard.harness.{BuildTop}
 import chipyard.clocking._
 import chipyard.iobinders._
-import barstools.iocell.chisel._
+import chipyard.iocell._
 import testchipip.serdes.{SerialTLKey}
 
 class WithFlatChipTop extends Config((site, here, up) => {
@@ -131,7 +131,7 @@ class FlatChipTop(implicit p: Parameters) extends LazyModule with HasChipyardPor
     require(!debug.clockeddmi.isDefined)
     require(!debug.apb.isDefined)
     val (jtag_pad, jtagIOCells) = debug.systemjtag.map { j =>
-      val jtag_wire = Wire(new JTAGChipIO)
+      val jtag_wire = Wire(new JTAGChipIO(false))
       j.jtag.TCK := jtag_wire.TCK
       j.jtag.TMS := jtag_wire.TMS
       j.jtag.TDI := jtag_wire.TDI
@@ -145,7 +145,7 @@ class FlatChipTop(implicit p: Parameters) extends LazyModule with HasChipyardPor
     // UART
     //==========================
     require(system.uarts.size == 1)
-    val (uart_pad, uartIOCells) = IOCell.generateIOFromSignal(system.module.uart.head, "uart_0", p(IOCellKey))
+    val (uart_pad, uartIOCells) = IOCell.generateIOFromSignal(system.uart.head, "uart_0", p(IOCellKey))
     val where = PBUS // TODO fix
     val bus = system.asInstanceOf[HasTileLinkLocations].locateTLBusWrapper(where)
     val freqMHz = bus.dtsFrequency.get / 1000000

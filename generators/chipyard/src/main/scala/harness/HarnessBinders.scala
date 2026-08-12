@@ -12,8 +12,8 @@ import freechips.rocketchip.subsystem._
 import freechips.rocketchip.util._
 import freechips.rocketchip.jtag.{JTAGIO}
 import freechips.rocketchip.devices.debug.{SimJTAG}
-import barstools.iocell.chisel._
-import testchipip.dram.{SimDRAM}
+import chipyard.iocell._
+import testchipip.dram.{SimDRAM, FastRAM}
 import testchipip.tsi.{SimTSI, SerialRAM, TSI, TSIIO}
 import testchipip.soc.{TestchipSimDTM}
 import testchipip.spi.{SimSPIFlashModel}
@@ -21,6 +21,8 @@ import testchipip.uart.{UARTAdapter, UARTToSerial}
 import testchipip.serdes._
 import testchipip.iceblk.{SimBlockDevice, BlockDeviceModel}
 import testchipip.cosim.{SpikeCosim}
+import testchipip.ctc.{CTCBridgeIO}
+import icenet.{NicLoopback, SimNetwork}
 import icenet._
 import chipyard._
 import chipyard.clocking.{HasChipyardPRCI}
@@ -44,6 +46,14 @@ class HarnessBinder[T <: HasHarnessInstantiators, S <: Port[_]](
 class WithGPIOTiedOff extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: GPIOPort, chipId: Int) => {
     port.io <> AnalogConst(0)
+
+  }
+})
+
+class WithGPIOPinsTiedOff extends HarnessBinder({
+  case (th: HasHarnessInstantiators, port: GPIOPinsPort, chipId: Int) => {
+    port.io := DontCare
+
   }
 })
 
@@ -64,6 +74,12 @@ class WithSimSPIFlashModel(rdOnly: Boolean = true) extends HarnessBinder({
     spi_mem.io.cs(0) := port.io.cs(0)
     spi_mem.io.dq.zip(port.io.dq).foreach { case (x, y) => x <> y }
     spi_mem.io.reset := th.harnessBinderReset
+  }
+})
+
+class WithI2CTiedOff extends HarnessBinder({
+  case (th: HasHarnessInstantiators, port: I2CPort, chipId: Int) => {
+    port.io <> DontCare
   }
 })
 
@@ -166,13 +182,14 @@ class WithTieOffL2FBusAXI extends HarnessBinder({
 class WithSimJTAGDebug extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: JTAGPort, chipId: Int) => {
     val dtm_success = WireInit(false.B)
-    when (dtm_success) { th.success := true.B }
+    when (dtm_success) { th.chiptopSuccess(chipId) := true.B }
     val jtag_wire = Wire(new JTAGIO)
     jtag_wire.TDO.data := port.io.TDO
     jtag_wire.TDO.driven := true.B
     port.io.TCK := jtag_wire.TCK
     port.io.TMS := jtag_wire.TMS
     port.io.TDI := jtag_wire.TDI
+    port.io.reset.foreach(_ := th.harnessBinderReset.asBool)
     val jtag = Module(new SimJTAG(tickDelay=3))
     jtag.connect(jtag_wire, th.harnessBinderClock, th.harnessBinderReset.asBool, ~(th.harnessBinderReset.asBool), dtm_success)
   }
@@ -181,7 +198,7 @@ class WithSimJTAGDebug extends HarnessBinder({
 class WithSimDMI extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: DMIPort, chipId: Int) => {
     val dtm_success = WireInit(false.B)
-    when (dtm_success) { th.success := true.B }
+    when (dtm_success) { th.chiptopSuccess(chipId) := true.B }
     val dtm = Module(new TestchipSimDTM()(Parameters.empty)).connect(th.harnessBinderClock, th.harnessBinderReset.asBool, port.io, dtm_success)
   }
 })
@@ -191,6 +208,7 @@ class WithTiedOffJTAG extends HarnessBinder({
     port.io.TCK := true.B.asClock
     port.io.TMS := true.B
     port.io.TDI := true.B
+    port.io.reset.foreach(_ := true.B)
   }
 })
 
@@ -209,44 +227,52 @@ class WithTiedOffDMI extends HarnessBinder({
 class WithSerialTLTiedOff(tieoffs: Option[Seq[Int]] = None) extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: SerialTLPort, chipId: Int) if (tieoffs.map(_.contains(port.portId)).getOrElse(true)) => {
     port.io match {
-      case io: DecoupledSerialIO => io.out.ready := false.B; io.in.valid := false.B; io.in.bits := DontCare;
-      case io: SourceSyncSerialIO => {
+      case io: DecoupledPhitIO => io.out.ready := false.B; io.in.valid := false.B; io.in.bits := DontCare;
+      case io: CreditedSourceSyncPhitIO => {
         io.clock_in := false.B.asClock
         io.reset_in := false.B.asAsyncReset
         io.in := DontCare
-        io.credit_in := DontCare
       }
     }
     port.io match {
-      case io: InternalSyncSerialIO =>
-      case io: ExternalSyncSerialIO => io.clock_in := false.B.asClock
+      case io: HasClockOut =>
+      case io: HasClockIn => io.clock_in := false.B.asClock
+      case io: CreditedSourceSyncPhitIO =>
       case _ =>
     }
   }
 })
 
-class WithSimTSIOverSerialTL extends HarnessBinder({
+class WithSimTSIOverSerialTL(fast: Boolean = false) extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: SerialTLPort, chipId: Int) if (port.portId == 0) => {
     port.io match {
-      case io: InternalSyncSerialIO =>
-      case io: ExternalSyncSerialIO => io.clock_in := th.harnessBinderClock
+      case io: HasClockOut =>
+      case io: HasClockIn => io.clock_in := th.harnessBinderClock
+      case io: CreditedSourceSyncPhitIO => io.clock_in := th.harnessBinderClock; io.reset_in := th.harnessBinderReset
     }
 
     port.io match {
-      case io: DecoupledSerialIO => {
+      case io: DecoupledPhitIO => {
         // If the port is locally synchronous (provides a clock), drive everything with that clock
         // Else, drive everything with the harnes clock
         val clock = port.io match {
-          case io: InternalSyncSerialIO => io.clock_out
-          case io: ExternalSyncSerialIO => th.harnessBinderClock
+          case io: HasClockOut => io.clock_out
+          case io: HasClockIn => th.harnessBinderClock
         }
         withClock(clock) {
-          val ram = Module(LazyModule(new SerialRAM(port.serdesser, port.params)(port.serdesser.p)).module)
-          ram.io.ser.in <> io.out
-          io.in <> ram.io.ser.out
-
-          val success = SimTSI.connect(ram.io.tsi, clock, th.harnessBinderReset, chipId)
-          when (success) { th.success := true.B }
+          if (fast) {
+            val ram = Module(LazyModule(new FastRAM(port.serdesser, port.params, chipId = chipId)(port.serdesser.p)).module)
+            ram.io.ser.in <> io.out
+            io.in <> ram.io.ser.out
+            val success = SimTSI.connect(ram.io.tsi, clock, th.harnessBinderReset, chipId)
+            when (success) { th.chiptopSuccess(chipId) := true.B }
+          } else {
+            val ram = Module(LazyModule(new SerialRAM(port.serdesser, port.params)(port.serdesser.p)).module)
+            ram.io.ser.in <> io.out
+            io.in <> ram.io.ser.out
+            val success = SimTSI.connect(ram.io.tsi, clock, th.harnessBinderReset, chipId)
+            when (success) { th.chiptopSuccess(chipId) := true.B }
+          }
         }
       }
     }
@@ -261,9 +287,9 @@ class WithDriveChipIdPin extends HarnessBinder({
 })
 
 class WithSimUARTToUARTTSI extends HarnessBinder({
-  case (th: HasHarnessInstantiators, port: UARTPort, chipId: Int) => {
-    UARTAdapter.connect(Seq(port.io),
-      baudrate=port.io.c.initBaudRate,
+  case (th: HasHarnessInstantiators, port: UARTTSIPort, chipId: Int) => {
+    UARTAdapter.connect(Seq(port.io.uart),
+      baudrate=port.io.uart.c.initBaudRate,
       clockFrequency=th.getHarnessBinderClockFreqHz.toInt,
       forcePty=true)
   }
@@ -275,7 +301,7 @@ class WithSimTSIToUARTTSI extends HarnessBinder({
     val uart_to_serial = Module(new UARTToSerial(freq, port.io.uart.c))
     val serial_width_adapter = Module(new SerialWidthAdapter(8, TSI.WIDTH))
     val success = SimTSI.connect(Some(TSIIO(serial_width_adapter.io.wide)), th.harnessBinderClock, th.harnessBinderReset)
-    when (success) { th.success := true.B }
+    when (success) { th.chiptopSuccess(chipId) := true.B }
     assert(!uart_to_serial.io.dropped)
     serial_width_adapter.io.narrow.flipConnect(uart_to_serial.io.serial)
     uart_to_serial.io.uart.rxd := port.io.uart.txd
@@ -285,7 +311,7 @@ class WithSimTSIToUARTTSI extends HarnessBinder({
 
 class WithTraceGenSuccess extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: SuccessPort, chipId: Int) => {
-    when (port.io) { th.success := true.B }
+    when (port.io) { th.chiptopSuccess(chipId) := true.B }
   }
 })
 
@@ -314,6 +340,49 @@ class WithClockFromHarness extends HarnessBinder({
 class WithResetFromHarness extends HarnessBinder({
   case (th: HasHarnessInstantiators, port: ResetPort, chipId: Int) => {
     port.io := th.referenceReset.asAsyncReset
+  }
+})
+
+class WithOffchipBusSelPlusArg extends HarnessBinder({
+  case (th: HasHarnessInstantiators, port: OffchipSelPort, chipId: Int) => {
+    val pin = PlusArg("offchip_sel", width=port.io.getWidth)
+    port.io := pin
+  }
+})
+
+class WithCTCTiedOff extends HarnessBinder({
+  case (th: HasHarnessInstantiators, port: CTCPort, chipId: Int) => {
+    port.io match {
+      case io: CreditedSourceSyncPhitIO => {
+        io.clock_in := false.B.asClock
+        io.reset_in := false.B.asAsyncReset
+        io.in := DontCare
+      }
+      case io: CTCBridgeIO => {
+        io.manager_flit := DontCare
+        io.manager_flit.in.valid := false.B
+        io.manager_flit.out.ready := false.B
+        io.client_flit := DontCare
+        io.client_flit.in.valid := false.B
+        io.client_flit.out.ready := false.B
+      }
+    }
+  }
+})
+
+class WithCTCLoopback extends HarnessBinder({
+  case (th: HasHarnessInstantiators, port: CTCPort, chipId: Int) => {
+    port.io match {
+      case io: CreditedSourceSyncPhitIO => {
+        io.clock_in := io.clock_out
+        io.reset_in := io.reset_out
+        io.in := io.out
+      }
+      case io: CTCBridgeIO => {
+        io.client_flit.in <> io.manager_flit.out
+        io.manager_flit.in <> io.client_flit.out
+      }
+    }
   }
 })
 
@@ -371,7 +440,7 @@ class WithSimpleDmaControllerHarness extends HarnessBinder({
     println(s"[WithSimpleDmaControllerHarness] Matched NICPort ${chipId}. Applying SimpleDmaControllerConnector.")
     println(s"[WithSimpleDmaControllerHarness] port.params = ${port.params}")
     println(s"[WithSimpleDmaControllerHarness] port.io.clock = ${port.io.clock}")
-    
+
     withClock(port.io.clock) {
       // Apply the connector logic defined in NIC.scala
       icenet.SimpleDmaControllerConnector.connect(
@@ -390,12 +459,12 @@ class WithRecursiveDoublingWithDMAHarness extends HarnessBinder({
     println(s"[WithRecursiveDoublingWithDMAHarness] Matched NICPort ${chipId}. Applying Verilator Harness.")
     println(s"[WithRecursiveDoublingWithDMAHarness] port.params = ${port.params}")
     println(s"[WithRecursiveDoublingWithDMAHarness] port.io.clock = ${port.io.clock}")
-    
+
     withClock(port.io.clock) {
       val nicio = icenet.NICIO(port.io.bits.asInstanceOf[icenet.NICIOvonly])
       // Create the switch interface wire
       val switchio = Wire(new icenet.NICIOvonly)
-      
+
       // Pass chipId as the node rank - this is reliable in both Verilator and FireSim
       icenet.RecursiveDoublingWithDMAConnector.connect(
         nicio,
@@ -405,8 +474,8 @@ class WithRecursiveDoublingWithDMAHarness extends HarnessBinder({
         port.io.clock,
         th.harnessBinderReset.asBool
       )
-      
-      // Tie off switchio inputs 
+
+      // Tie off switchio inputs
       // We are focusing on FireSim only, and this pattern is not compatible with Verilator.
       switchio.in.valid := false.B
       switchio.in.bits := DontCare

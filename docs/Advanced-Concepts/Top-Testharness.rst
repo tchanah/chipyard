@@ -25,6 +25,8 @@ The default standard ``ChipTop`` provides a mimimal, barebones template for ``IO
 For tapeouts, integrating Analog IP, or other non-standard use cases, Chipyard supports specifying a custom ``ChipTop`` using the ``BuildTop`` key.
 An example of a custom ChipTop which uses non-standard IOCells is provided in `generators/chipyard/src/main/scala/example/CustomChipTop.scala <https://github.com/ucb-bar/chipyard/blob/main/generators/chipyard/src/main/scala/example/CustomChipTop.scala>`__
 
+You can also specify a fully custom ChipTop that does not use any RocketChip or Chipyard SoC components. An example of this is provided in `generators/chipyard/src/main/scala/example/EmptyChipTop.scala <https://github.com/ucb-bar/chipyard/blob/main/generators/chipyard/src/main/scala/example/EmptyChipTop.scala>`__. The ``EmptyChipTop`` example can be built with ``make CONFIG=EmptyChipTopConfig TOP=EmptyChipTop``.
+
 
 System/DigitalTop
 -------------------------
@@ -36,7 +38,7 @@ Specifically, ``DigitalTop`` extends a ``System``, which extends a ``Subsystem``
 BaseSubsystem
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The ``BaseSubsystem`` is defined in ``generators/rocketchip/src/main/scala/subsystem/BaseSubsystem.scala``.
+The ``BaseSubsystem`` is defined in `generators/rocket-chip/src/main/scala/subsystem/BaseSubsystem.scala <https://ucb.bar/rocket-chip/src/main/scala/subsystem/BaseSubsystem.scala>`_.
 Looking at the ``BaseSubsystem`` abstract class, we see that this class instantiates the top-level buses
 (frontbus, systembus, peripherybus, etc.), but does not specify a topology.
 We also see this class define several ``ElaborationArtefacts``, files emitted after Chisel elaboration
@@ -53,12 +55,12 @@ We also connect some basic IOs for each tile here, specifically the hartids and 
 System
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``generators/chipyard/src/main/scala/System.scala`` completes the definition of the ``System``.
+`generators/chipyard/src/main/scala/System.scala <https://ucb.bar/chipyard/generators/chipyard/src/main/scala/System.scala>`__ completes the definition of the ``System``.
 
-- ``HasHierarchicalBusTopology`` is defined in Rocket Chip, and specifies connections between the top-level buses
 - ``HasAsyncExtInterrupts`` and ``HasExtInterruptsModuleImp`` adds IOs for external interrupts and wires them appropriately to tiles
-- ``CanHave...AXI4Port`` adds various Master and Slave AXI4 ports, adds TL-to-AXI4 converters, and connects them to the appropriate buses
-- ``HasPeripheryBootROM`` adds a BootROM device
+- ``CanHaveMasterTLMemPort`` adds a TileLink port for outer memory
+- ``CanHave...AXI4...Port`` adds various Master and Slave AXI4 ports, adds TL-to-AXI4 converters, and connects them to the appropriate buses
+- ``HasRTCModuleImp`` adds a real time clock for the buses
 
 Tops
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -82,6 +84,6 @@ custom traits together without having to worry about the details of the implemen
 TestDriver
 -------------------------
 
-The ``TestDriver`` is defined in ``generators/rocketchip/src/main/resources/vsrc/TestDriver.v``.
+The ``TestDriver`` is defined in `generators/rocketchip/src/main/resources/vsrc/TestDriver.v <https://ucb.bar/rocket-chip/src/main/resources/vsrc/TestDriver.v>`__.
 This Verilog file executes a simulation by instantiating the ``TestHarness``, driving the clock and reset signals, and interpreting the success output.
 This file is compiled with the generated Verilog for the ``TestHarness`` and the ``Top`` to produce a simulator.

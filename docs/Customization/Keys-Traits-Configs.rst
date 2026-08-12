@@ -7,7 +7,7 @@ You have probably seen snippets of Chisel referencing keys, traits, and configs 
 This section aims to elucidate the interactions between these Chisel/Scala components, and provide
 best practices for how these should be used to create a parameterized design and configure it.
 
-We will continue to use the GCD example.
+We will continue to use the `GCD example <https://ucb.bar/cy/generators/chipyard/src/main/scala/example/GCD.scala>`__.
 
 Keys
 ----
@@ -79,4 +79,5 @@ We can use this config fragment when composing our configs.
 Chipyard Config Fragments
 -------------------------
 
-For discoverability, users can run ``make find-config-fragments`` to see a list of config. fragments.
+For discoverability, users can run ``make find-configs`` to list Chipyard ``Config`` classes eligible for ``CONFIG=...`` (defaults to package ``chipyard``). Only classes whose names end with ``Config`` are shown.
+To see reusable building blocks, run ``make find-config-fragments`` to list config fragments.

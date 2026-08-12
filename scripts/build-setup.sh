@@ -12,11 +12,10 @@ source $CYDIR/scripts/utils.sh
 common_setup
 
 usage() {
-    echo "Usage: ${0} [OPTIONS] [riscv-tools | esp-tools]"
+    echo "Usage: ${0} [OPTIONS] [riscv-tools]"
     echo ""
     echo "Installation Types"
     echo "  riscv-tools: if set, builds the riscv toolchain (this is also the default)"
-    echo "  esp-tools: if set, builds esp-tools toolchain used for the hwacha vector accelerator"
     echo ""
     echo "Helper script to fully initialize repository that wraps other scripts."
     echo "By default it initializes/installs things in the following order:"
@@ -38,7 +37,10 @@ usage() {
     echo "  --help -h               : Display this message"
     echo "  --verbose -v            : Verbose printout"
     echo "  --use-unpinned-deps -ud : Use unpinned conda environment"
-    echo "  --use-lean-conda        : Install a leaner version of the repository (Smaller conda env, no FireSim, no FireMarshal)"
+    echo "  --use-lean-conda        : Install a leaner version of the repository (smaller conda env, no FireSim, no FireMarshal)"
+    echo "  --build-circt           : Builds CIRCT from source, instead of downloading the precompiled binary"
+    echo "  --conda-env-name NAME   : Optionally use a global conda env name instead of storing env in Chipyard directory"
+    echo "  --github-token TOKEN    : Optionally use a Github token to download CIRCT"
 
     echo "  --skip -s N             : Skip step N in the list above. Use multiple times to skip multiple steps ('-s N -s M ...')."
     echo "  --skip-conda            : Skip Conda initialization (step 1)"
@@ -60,6 +62,9 @@ VERBOSE_FLAG=""
 USE_UNPINNED_DEPS=false
 USE_LEAN_CONDA=false
 SKIP_LIST=()
+BUILD_CIRCT=false
+GLOBAL_ENV_NAME=""
+GITHUB_TOKEN="null"
 
 # getopts does not support long options, and is inflexible
 while [ "$1" != "" ];
@@ -67,7 +72,7 @@ do
     case $1 in
         -h | --help )
             usage 3 ;;
-        riscv-tools | esp-tools)
+        riscv-tools )
             TOOLCHAIN_TYPE=$1 ;;
         --verbose | -v)
             VERBOSE_FLAG=$1
@@ -75,6 +80,14 @@ do
         --use-lean-conda)
             USE_LEAN_CONDA=true
             SKIP_LIST+=(4 6 7 8 9) ;;
+        --build-circt)
+            BUILD_CIRCT=true ;;
+        --conda-env-name)
+            shift
+            GLOBAL_ENV_NAME=${1} ;;
+        --github-token)
+            shift
+            GITHUB_TOKEN=${1} ;;
         -ud | --use-unpinned-deps )
             USE_UNPINNED_DEPS=true ;;
         --skip | -s)
@@ -98,8 +111,6 @@ do
             SKIP_LIST+=(10) ;;
         --skip-clean)
             SKIP_LIST+=(11) ;;
-        --force | -f | --skip-validate) # Deprecated flags
-            ;;
         * )
             error "invalid option $1"
             usage 1 ;;
@@ -114,29 +125,6 @@ run_step() {
 }
 
 {
-
-# esp-tools should ONLY be used for hwacha.
-# Check for this, since many users will be attempting to use this with gemmini
-if [ $TOOLCHAIN_TYPE == "esp-tools" ]; then
-    while true; do
-        printf '\033[2J'
-        read -p "WARNING: You are trying to install the esp-tools toolchain."$'\n'"This should ONLY be used for Hwacha development."$'\n'"Gemmini should be used with riscv-tools."$'\n'"Type \"y\" to continue if this is intended, or \"n\" if not: " validate
-        case "$validate" in
-            y | Y)
-                echo "Installing esp-tools."
-                break
-                ;;
-            n | N)
-                error "Rerun with riscv-tools"
-                exit 3
-                ;;
-            *)
-                error "Invalid response. Please type \"y\" or \"n\""
-                ;;
-        esac
-    done
-fi
-
 
 #######################################
 ###### BEGIN STEP-BY-STEP SETUP #######
@@ -159,6 +147,9 @@ function exit_if_last_command_failed
     fi
 }
 
+# add helper variable pointing to current chipyard top-level dir
+replace_content env.sh cy-dir-helper "CY_DIR=${CYDIR}"
+
 # setup and install conda environment
 if run_step "1"; then
     begin_step "1" "Conda environment setup"
@@ -172,17 +163,54 @@ if run_step "1"; then
       LOCKFILE=$CONDA_LOCK_REQS/conda-requirements-$TOOLCHAIN_TYPE-linux-64-lean.conda-lock.yml
     fi
 
+    # create conda-lock only environment to be used in this section.
+    # done with cloning base then installing conda lock to speed up dependency solving.
+    CONDA_LOCK_ENV_PATH=$CYDIR/.conda-lock-env
+
+    # check if directories already exist
+    if [ -d $CONDA_LOCK_ENV_PATH ] || [ -d "$CYDIR/.conda-env" ]; then
+        echo "Error: Conda environment directories already exist! Delete them before trying to recreate the \
+conda environment or \`source env.sh\` and skip this step with \`-s 1\`." >&2
+        exit 1
+    fi
+    
+    rm -rf $CONDA_LOCK_ENV_PATH &&
+    conda create -y -p $CONDA_LOCK_ENV_PATH -c conda-forge $(grep "conda-lock" $CONDA_REQS/chipyard-base.yaml | sed 's/^ \+-//') &&
+    source $(conda info --base)/etc/profile.d/conda.sh &&
+    conda activate $CONDA_LOCK_ENV_PATH
+    exit_if_last_command_failed
+
     if [ "$USE_UNPINNED_DEPS" = true ]; then
         # auto-gen the lockfiles
         $CYDIR/scripts/generate-conda-lockfiles.sh
         exit_if_last_command_failed
     fi
-    echo "Using lockfile: $LOCKFILE"
+    SYS_GLIBC=$(ldd --version | awk '/ldd/{print $NF}')
+    DEFAULT_GLIBC=$(grep -i "sysroot_linux-64=" conda-reqs/chipyard-base.yaml | awk -F= '{print $2}')
+    if [ "$SYS_GLIBC" != "$DEFAULT_GLIBC" ]; then
+        # replace the glibc version
+        sed -i.bak "s/^\([[:space:]]*-\s*sysroot_linux-64=\).*/\1$SYS_GLIBC/" conda-reqs/chipyard-base.yaml
+        $CYDIR/scripts/generate-conda-lockfiles.sh
+        exit_if_last_command_failed
+    fi
+    echo "Using lockfile for conda: $LOCKFILE"
 
     # use conda-lock to create env
-    conda-lock install --conda $(which conda) -p $CYDIR/.conda-env $LOCKFILE &&
-    source $CYDIR/.conda-env/etc/profile.d/conda.sh &&
-    conda activate $CYDIR/.conda-env
+    if [ -z "$GLOBAL_ENV_NAME" ] ; then
+        CONDA_ENV_PATH=$CYDIR/.conda-env
+        CONDA_ENV_ARG="-p $CONDA_ENV_PATH"
+        CONDA_ENV_NAME=$CONDA_ENV_PATH
+    else
+        CONDA_ENV_ARG="-n $GLOBAL_ENV_NAME"
+        CONDA_ENV_NAME=$GLOBAL_ENV_NAME
+    fi
+    echo "Storing main conda environment in $CONDA_ENV_NAME"
+
+    conda-lock install --conda $CONDA_EXE $CONDA_ENV_ARG $LOCKFILE &&
+    ## If the above line errors in your environment, you can try the line below
+    # conda-lock install --conda $(which conda) $CONDA_ENV_ARG $LOCKFILE &&
+    source $(conda info --base)/etc/profile.d/conda.sh &&
+    conda activate $CONDA_ENV_NAME
     exit_if_last_command_failed
 
     # Conda Setup
@@ -195,16 +223,14 @@ if ! type conda >& /dev/null; then
     return 1  # don't want to exit here because this file is sourced
 fi
 
-# if we're sourcing this in a sub process that has conda in the PATH but not as a function, init it again
-conda activate --help >& /dev/null || source $(conda info --base)/etc/profile.d/conda.sh
+source $(conda info --base)/etc/profile.d/conda.sh
 \0
 END_CONDA_ACTIVATE
 
     replace_content env.sh build-setup-conda "# line auto-generated by $0
 $CONDA_ACTIVATE_PREAMBLE
-conda activate $CYDIR/.conda-env
+conda activate $CONDA_ENV_NAME
 source $CYDIR/scripts/fix-open-files.sh"
-
 fi
 
 if [ -z ${CONDA_DEFAULT_ENV+x} ]; then
@@ -214,17 +240,8 @@ fi
 # initialize all submodules (without the toolchain submodules)
 if run_step "2"; then
     begin_step "2" "Initializing Chipyard submodules"
-    $CYDIR/scripts/init-submodules-no-riscv-tools.sh
+    $CYDIR/scripts/init-submodules-no-riscv-tools.sh --full
     exit_if_last_command_failed
-    
-    # Ensure icenet submodule is on the correct branch
-    if [ -d "$CYDIR/generators/icenet" ]; then
-        echo "Setting icenet submodule to collective-llm-v2026.06 branch"
-        cd "$CYDIR/generators/icenet"
-        git fetch origin
-        git checkout collective-llm-v2026.06 || git checkout -b collective-llm-v2026.06 origin/collective-llm-v2026.06
-        cd "$CYDIR"
-    fi
 fi
 
 # build extra toolchain collateral (i.e. spike, pk, riscv-tests, libgloss)
@@ -273,11 +290,10 @@ if run_step "6"; then
         pushd $CYDIR/sims/firesim &&
         (
             set -e # Subshells un-set "set -e" so it must be re enabled
-            echo $CYDIR
             source sourceme-manager.sh --skip-ssh-setup
             pushd sim
-            # make sbt SBT_COMMAND="project {file:$CYDIR}firechip; compile" TARGET_PROJECT=firesim # TODO: Add this back in
-            make sbt SBT_COMMAND="project firesim; compile" TARGET_PROJECT=firesim
+            # avoid directly building classpath s.t. target-injected files can be recompiled
+            make sbt SBT_COMMAND="compile"
             popd
         )
         exit_if_last_command_failed
@@ -297,13 +313,16 @@ if run_step "8"; then
         begin_step "9" "Pre-compiling FireMarshal buildroot sources"
         source $CYDIR/scripts/fix-open-files.sh &&
         ./marshal $VERBOSE_FLAG build br-base.json &&
-        ./marshal $VERBOSE_FLAG clean br-base.json
+        ./marshal $VERBOSE_FLAG build bare-base.json
         exit_if_last_command_failed
     fi
     popd
+    # Ensure FireMarshal CLI is on PATH in env.sh (idempotent)
+    replace_content env.sh build-setup-marshal "# line auto-generated by build-setup.sh\n__DIR=\"$CYDIR\"\nPATH=\\$__DIR/software/firemarshal:\\$PATH"
 fi
 
 if run_step "10"; then
+    begin_step "10" "Installing CIRCT"
     # install circt into conda
     if run_step "1"; then
         PREFIX=$CONDA_PREFIX/$TOOLCHAIN_TYPE
@@ -315,33 +334,27 @@ if run_step "10"; then
         PREFIX=$RISCV
     fi
 
-    git submodule update --init $CYDIR/tools/install-circt &&
-    $CYDIR/tools/install-circt/bin/download-release-or-nightly-circt.sh \
-        -f circt-full-shared-linux-x64.tar.gz \
-        -i $PREFIX \
-        -v version-file \
-        -x $CYDIR/conda-reqs/circt.json \
-        -g null
-    exit_if_last_command_failed
-    
-    # Ensure icenet submodule is still on the correct branch after any submodule updates
-    if [ -d "$CYDIR/generators/icenet" ]; then
-        echo "Re-checking icenet submodule branch after CIRCT installation"
-        cd "$CYDIR/generators/icenet"
-        current_branch=$(git branch --show-current 2>/dev/null || echo "detached")
-        if [ "$current_branch" != "collective-llm-v2026.06" ]; then
-            echo "Switching icenet back to collective-llm-v2026.06 branch"
-            git fetch origin
-            git checkout collective-llm-v2026.06 || git checkout -b collective-llm-v2026.06 origin/collective-llm-v2026.06
-        fi
-        cd "$CYDIR"
+    if [ "$BUILD_CIRCT" = true ] ; then
+	echo "Building CIRCT from source, and installing to $PREFIX"
+	$CYDIR/scripts/build-circt-from-source.sh --prefix $PREFIX
+    else
+	echo "Downloading CIRCT from nightly build"
+
+	git submodule update --init $CYDIR/tools/install-circt &&
+	    $CYDIR/tools/install-circt/bin/download-release-or-nightly-circt.sh \
+		-f circt-full-static-linux-x64.tar.gz \
+		-i $PREFIX \
+		-v version-file \
+		-x $CYDIR/conda-reqs/circt.json \
+		-g $GITHUB_TOKEN
     fi
+    exit_if_last_command_failed
 fi
 
 
 # do misc. cleanup for a "clean" git status
 if run_step "11"; then
-    begin_step "10" "Cleaning up repository"
+    begin_step "11" "Cleaning up repository"
     $CYDIR/scripts/repo-clean.sh
     exit_if_last_command_failed
 fi

@@ -5,7 +5,7 @@ import chisel3._
 import freechips.rocketchip.devices.debug.{HasPeripheryDebug}
 import freechips.rocketchip.jtag.{JTAGIO}
 
-import sifive.blocks.devices.uart.{UARTPortIO, HasPeripheryUARTModuleImp}
+import sifive.blocks.devices.uart.{UARTPortIO}
 import sifive.blocks.devices.jtag.{JTAGPins, JTAGPinsFromPort}
 import sifive.blocks.devices.pinctrl.{BasePin}
 
@@ -34,6 +34,7 @@ class WithArtyJTAGHarnessBinder extends HarnessBinder({
     port.io.TCK := jtag_wire.TCK
     port.io.TMS := jtag_wire.TMS
     port.io.TDI := jtag_wire.TDI
+    port.io.reset.foreach(_ := th.referenceReset)
 
     val io_jtag = Wire(new JTAGPins(() => new BasePin(), false)).suggestName("jtag")
 

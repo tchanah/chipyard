@@ -7,7 +7,7 @@ import freechips.rocketchip.prci._
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.subsystem._
 import freechips.rocketchip.tilelink._
-import barstools.iocell.chisel._
+import chipyard.iocell._
 
 // This uses the FakePLL, which uses a ClockAtFreq Verilog blackbox to generate
 // the requested clocks. This also adds TileLink ClockDivider and ClockSelector
@@ -27,9 +27,9 @@ class WithPLLSelectorDividerClockGenerator(enable: Boolean = true) extends Overr
     val clockSelector = system.prci_ctrl_domain { LazyModule(new TLClockSelector(baseAddress + 0x30000, tlbus.beatBytes, enable=enable)) }
     val pllCtrl       = system.prci_ctrl_domain { LazyModule(new FakePLLCtrl    (baseAddress + 0x40000, tlbus.beatBytes)) }
 
-    clockDivider.tlNode  := system.prci_ctrl_domain { TLFragmenter(tlbus.beatBytes, tlbus.blockBytes) := system.prci_ctrl_bus.get }
-    clockSelector.tlNode := system.prci_ctrl_domain { TLFragmenter(tlbus.beatBytes, tlbus.blockBytes) := system.prci_ctrl_bus.get }
-    pllCtrl.tlNode       := system.prci_ctrl_domain { TLFragmenter(tlbus.beatBytes, tlbus.blockBytes) := system.prci_ctrl_bus.get }
+    clockDivider.tlNode  := system.prci_ctrl_domain { TLFragmenter(tlbus, Some("ClockDivider")) := system.prci_ctrl_bus.get }
+    clockSelector.tlNode := system.prci_ctrl_domain { TLFragmenter(tlbus, Some("ClockSelector")) := system.prci_ctrl_bus.get }
+    pllCtrl.tlNode       := system.prci_ctrl_domain { TLFragmenter(tlbus, Some("PLLCtrl")) := system.prci_ctrl_bus.get }
 
     system.chiptopClockGroupsNode := clockDivider.clockNode := clockSelector.clockNode
 
@@ -72,7 +72,7 @@ class WithPLLSelectorDividerClockGenerator(enable: Boolean = true) extends Overr
     }
   }
 })
- 
+
 // This passes all clocks through to the TestHarness
 class WithPassthroughClockGenerator extends OverrideLazyIOBinder({
   (system: HasChipyardPRCI) => {
@@ -98,6 +98,63 @@ class WithPassthroughClockGenerator extends OverrideLazyIOBinder({
         ClockPort(() => clock_io, freq)
       }.toSeq
       ((clock_ios :+ ResetPort(() => reset_io)), Nil)
+    }
+  }
+})
+
+// Broadcasts a single clock IO to all clock domains. Ignores all requested frequencies
+class WithSingleClockBroadcastClockGenerator(freqMHz: Int = 100) extends OverrideLazyIOBinder({
+  (system: HasChipyardPRCI) => {
+    implicit val p = GetSystemParameters(system)
+
+    val clockGroupsAggregator = LazyModule(new ClockGroupAggregator("single_clock"))
+    val clockGroupsSourceNode = ClockGroupSourceNode(Seq(ClockGroupSourceParameters()))
+    system.chiptopClockGroupsNode :*= clockGroupsAggregator.node := clockGroupsSourceNode
+
+    InModuleBody {
+      val clock_wire = Wire(Input(Clock()))
+      val reset_wire = Wire(Input(AsyncReset()))
+      val (clock_io, clockIOCell) = IOCell.generateIOFromSignal(clock_wire, "clock", p(IOCellKey))
+      val (reset_io, resetIOCell) = IOCell.generateIOFromSignal(reset_wire, "reset", p(IOCellKey))
+
+      clockGroupsSourceNode.out.foreach { case (bundle, edge) =>
+        bundle.member.data.foreach { b =>
+          b.clock := clock_wire
+          b.reset := reset_wire
+        }
+      }
+      (Seq(ClockPort(() => clock_io, freqMHz), ResetPort(() => reset_io)), clockIOCell ++ resetIOCell)
+    }
+  }
+})
+
+class WithMultiIOCellsClockGenerator extends OverrideLazyIOBinder({
+  (system: HasChipyardPRCI) => {
+    implicit val p = GetSystemParameters(system)
+
+    val clockGroupsSourceNode = ClockGroupSourceNode(Seq(ClockGroupSourceParameters()))
+    system.chiptopClockGroupsNode :*= clockGroupsSourceNode
+
+    InModuleBody {
+      val reset_wire = Wire(Input(AsyncReset()))
+      val (reset_io, resetIOCell) = IOCell.generateIOFromSignal(reset_wire, "reset", p(IOCellKey))
+
+      require(clockGroupsSourceNode.out.size == 1)
+      val (bundle, edge) = clockGroupsSourceNode.out.head
+
+      val iosAndIOCells = (bundle.member.data zip edge.sink.members).map { case (b, m) =>
+        require(m.take.isDefined, s"""Clock ${m.name.get} has no requested frequency
+                                     |Clocks: ${edge.sink.members.map(_.name.get)}""".stripMargin)
+        val freq = m.take.get.freqMHz
+        val clock_wire = Wire(Input(Clock()))
+        val (clock_io, clockIOCell) = IOCell.generateIOFromSignal(clock_wire, s"clock_${m.name.get}", p(IOCellKey))
+        b.clock := clock_wire
+        b.reset := reset_wire
+        (ClockPort(() => clock_io, freq), clockIOCell)
+      }.toSeq
+      val clock_ios = iosAndIOCells.map(_._1)
+      val clockIOCells = iosAndIOCells.flatMap(_._2)
+      ((clock_ios :+ ResetPort(() => reset_io)), clockIOCells ++ resetIOCell)
     }
   }
 })

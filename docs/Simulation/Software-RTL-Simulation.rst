@@ -50,16 +50,16 @@ This will elaborate the ``RocketConfig`` in the example project.
 
 .. Note:: The elaboration of ``RocketConfig`` requires about 6.5 GB of main memory. Otherwise the process will fail with ``make: *** [firrtl_temp] Error 137`` which is most likely related to limited resources. Other configurations might require even more main memory.
 
-An executable called ``simulator-chipyard-RocketConfig`` will be produced.
+An executable called ``simulator-chipyard.harness-RocketConfig`` will be produced.
 This executable is a simulator that has been compiled based on the design that was built.
 You can then use this executable to run any compatible RV64 code.
 For instance, to run one of the riscv-tools assembly tests.
 
 .. code-block:: shell
 
-    ./simulator-chipyard-RocketConfig $RISCV/riscv64-unknown-elf/share/riscv-tests/isa/rv64ui-p-simple
+    ./simulator-chipyard.harness-RocketConfig $RISCV/riscv64-unknown-elf/share/riscv-tests/isa/rv64ui-p-simple
 
-.. Note:: In a VCS simulator, the simulator name will be ``simv-chipyard-RocketConfig`` instead of ``simulator-chipyard-RocketConfig``.
+.. Note:: In a VCS simulator, the simulator name will be ``simv-chipyard.harness-RocketConfig`` instead of ``simulator-chipyard.harness-RocketConfig``.
 
 The makefiles have a ``run-binary`` rule that simplifies running the simulation executable. It adds many of the common command line options for you and redirects the output to a file.
 
@@ -154,12 +154,16 @@ Therefore, in order to simulate a simple Rocket-based example system we can use:
     make SUB_PROJECT=yourproject
     ./simulator-<yourproject>-<yourconfig> ...
 
+Listing available configs
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
-All ``make`` targets that can be applied to the default example, can also be applied to custom project using the custom environment variables. For example, the following code example will run the RISC-V assembly benchmark suite on the Hwacha subproject:
+To discover available Chipyard configs that can be passed as ``CONFIG=...`` (under the default ``CONFIG_PACKAGE=chipyard``), run:
 
 .. code-block:: shell
 
-    make SUB_PROJECT=hwacha run-asm-tests
+    make find-configs
+
+This lists Chipyard classes that extend ``Config``. Only classes whose names end with ``Config`` are shown.
 
 
 Finally, in the ``generated-src/<...>-<package>-<config>/`` directory resides all of the collateral while the generated Verilog source files resides in ``generated-src/<...>-<package>-<config>/gen-collateral`` for the build/simulation.
@@ -193,7 +197,7 @@ A special target that automatically generates the waveform file for a specific t
     make run-binary-debug BINARY=test.riscv
 
 For a Verilator simulation, this will generate a vcd file (vcd is a standard waveform representation file format) that can be loaded to any common waveform viewer.
-An open-source vcd-capable waveform viewer is `GTKWave <http://gtkwave.sourceforge.net/>`__.
+Examples of open-source options of vcd-capable waveform viewers include `Surfer <https://surfer-project.org/>`__ and `GTKWave <http://gtkwave.sourceforge.net/>`__.
 
 For a VCS simulation, this will generate an fsdb file that can be loaded to fsdb-supported waveform viewers.
 If you have Synopsys licenses, we recommend using the Verdi waveform viewer.
@@ -246,6 +250,7 @@ For instance:
 
 .. code-block:: scala
 
+  // ucb.bar/chipyard/generators/chipyard/src/main/scala/config/RocketConfigs.scala#L108
   class FastRTLSimRocketConfig extends Config(
     new freechips.rocketchip.subsystem.WithoutTLMonitors ++
     new chipyard.RocketConfig)
