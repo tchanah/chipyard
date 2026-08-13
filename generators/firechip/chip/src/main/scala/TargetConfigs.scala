@@ -405,7 +405,8 @@ class FireSimRecursiveDoublingWithDMAConfig extends Config(
 
 // FireSim RecursiveDoublingWithDMA config (Rocket core)
 class FireSimRecursiveDoublingWithDMARocketConfig extends Config(
-  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, maxChunks = 1024, numMemoryBlocks = 1024) ++
+  // memWidth = 256 (32 B DMA beats) to match the Verilator baseline; the param default is 128.
+  new icenet.collective.WithRecursiveDoublingWithDMA(EnableDebug = false, EnableStats = false, maxChunks = 1024, numMemoryBlocks = 4096, memWidth = 256) ++
   new chipyard.harness.WithRecursiveDoublingWithDMAHarness ++
   new icenet.WithIceNIC ++
   new freechips.rocketchip.rocket.WithNBigCores(1) ++
