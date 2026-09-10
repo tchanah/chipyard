@@ -16,7 +16,9 @@ dependencies:
     #   documentation on package_spec syntax for constraining versions
     - gcc=13.2
     - gxx=13.2
-    - sysroot_linux-64=2.34 # need to be close to system glibc for VCS compatibility
+    # was 2.34; bumped to match the Ubuntu 24.04 host glibc so build-setup skips the slow lockfile regen
+    # keep this value bare (no trailing comment): build-setup parses it with awk -F=
+    - sysroot_linux-64=2.39
     - conda-gcc-specs
     - binutils
 

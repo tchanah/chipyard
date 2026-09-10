@@ -240,7 +240,10 @@ fi
 # initialize all submodules (without the toolchain submodules)
 if run_step "2"; then
     begin_step "2" "Initializing Chipyard submodules"
-    $CYDIR/scripts/init-submodules-no-riscv-tools.sh --full
+    # was --full: pulled every optional accelerator (cva6/nvdla/ara/gemmini/...), several with
+    # broken nested-submodule paths in this tree and none needed for stock FireSimRocketConfig.
+    # Run ./scripts/init-submodules-no-riscv-tools.sh --<name> by hand if one is needed later.
+    $CYDIR/scripts/init-submodules-no-riscv-tools.sh
     exit_if_last_command_failed
 fi
 
